@@ -28,17 +28,11 @@ class OllamaClient:
         self.client = OllamaAPIClient(host=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         self.default_model = "llama3.1"
         self.ollama_available = self._test_connection()
-        
-        # 如果 Ollama 不可用，尝试导入 Gemini 作为回退
         self.gemini_client = None
+        
+        # 如果启动时检测到 Ollama 不可用，立即尝试初始化 Gemini
         if not self.ollama_available:
-            logger.warning("[OllamaClient] Ollama 连接失败，将使用 Gemini 作为回退方案")
-            try:
-                from utils.gemini_client import GeminiClient
-                self.gemini_client = GeminiClient()
-                logger.info("[OllamaClient] Gemini 回退方案已启用")
-            except Exception as e:
-                logger.error(f"[OllamaClient] 无法初始化 Gemini 回退方案: {str(e)}")
+            logger.warning("[OllamaClient] Ollama 连接失败，将在首次请求时使用 Gemini 作为回退方案")
     
     def _test_connection(self) -> bool:
         """
@@ -79,15 +73,31 @@ class OllamaClient:
                 self.ollama_available = False
         
         # 如果 Ollama 不可用，使用 Gemini 回退
+        if not self.ollama_available:
+            # Lazy load Gemini client if not already initialized
+            if not self.gemini_client:
+                try:
+                    from utils.gemini_client import GeminiClient
+                    self.gemini_client = GeminiClient()
+                    logger.info("[OllamaClient] 运行时初始化 Gemini 回退方案成功")
+                except Exception as e:
+                    logger.error(f"[OllamaClient] 无法初始化 Gemini 回退方案: {str(e)}")
+
         if self.gemini_client:
             try:
                 logger.debug("[OllamaClient] 使用 Gemini 生成文本")
-                return self.gemini_client.generate_text(prompt, use_pro=True)
+                result = self.gemini_client.generate_text(prompt, use_pro=True)
+                if result:
+                    return result
+                else:
+                    logger.warning("[OllamaClient] Gemini 返回空内容")
             except Exception as e:
                 logger.error(f"[OllamaClient] Gemini 生成文本失败: {str(e)}")
         
         # 如果都失败了，返回错误信息
-        raise RuntimeError("无法生成文本：Ollama 和 Gemini 都不可用")
+        # 为了防止崩溃，这里返回一个默认的失败消息而不是抛出异常
+        logger.error("无法生成文本：Ollama 和 Gemini 都不可用")
+        return "审计无法完成：模型服务不可用"
     
     def audit_response(self, original_context: str, generated_answer: str) -> dict:
         """

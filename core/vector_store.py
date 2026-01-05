@@ -156,12 +156,12 @@ class VectorStore:
         query_embedding = self.generate_embedding(query)
         
         # 执行搜索
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
             limit=limit,
             query_filter=filter_criteria
-        )
+        ).points
         
         # 处理搜索结果
         search_results = []
@@ -193,9 +193,9 @@ class VectorStore:
         """
         # 使用 Qdrant 的关键字过滤功能
         # 注意：这是一个简单的实现，实际应用中可能需要更复杂的 BM25 实现
-        results = self.client.search(
+        results = self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=self.generate_embedding(query),
+            query=self.generate_embedding(query),
             limit=limit,
             query_filter={
                 "must": [
@@ -207,7 +207,7 @@ class VectorStore:
                     }
                 ]
             }
-        )
+        ).points
         
         # 处理搜索结果
         search_results = []

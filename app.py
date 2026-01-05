@@ -1,6 +1,7 @@
 import streamlit as st
 from core.parser import PDFParser
 from core.vector_store import VectorStore
+from core.graph_store import GraphStore
 from agents.graph_builder import GraphBuilder
 from graph_flow import run_workflow
 from utils.gemini_client import GeminiClient
@@ -8,8 +9,18 @@ import base64
 import tempfile
 import os
 import logging
+import hashlib
 from datetime import datetime
 
+# ... (Previous imports remain, ensuring hashlib is at top)
+
+# Function to calculate file hash
+def get_file_hash(file_bytes):
+    md5_hash = hashlib.md5()
+    md5_hash.update(file_bytes)
+    return md5_hash.hexdigest()
+
+# ... (Logging setup remains)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,6 +42,7 @@ st.set_page_config(
 # 初始化各个模块
 parser = PDFParser()
 vector_store = VectorStore()
+graph_store = GraphStore()
 graph_builder = GraphBuilder()
 gemini_client = GeminiClient()
 
@@ -46,9 +58,111 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 if "processing_complete" not in st.session_state:
-    st.session_state.processing_complete = False
+    # Check if there are existing documents in the Knowledge Base
+    try:
+        existing_docs = graph_store.get_all_documents()
+        if existing_docs:
+            st.session_state.processing_complete = True
+            logger.info("[App] Found existing documents in Knowledge Base. Enabling chat.")
+        else:
+            st.session_state.processing_complete = False
+    except Exception as e:
+        logger.error(f"[App] Failed to check for existing documents: {str(e)}")
+        st.session_state.processing_complete = False
 
-# 侧边栏：文件上传和管理
+# 主界面：使用 Tab 分隔
+tab_qa, tab_kb = st.tabs(["💬 智能对话", "📚 知识库管理"])
+
+# Tab 1: 智能对话 (Original UI)
+with tab_qa:
+    col1, col2 = st.columns([2, 1])
+    
+    # 左侧：对话界面
+    with col1:
+        st.title("🧠 IC/BCD 多模态知识库系统")
+        
+        # 显示处理状态
+        if st.session_state.processing_complete:
+            st.success("文档就绪，可以开始提问！")
+        else:
+            if st.session_state.uploaded_files:
+                st.warning("请先点击侧边栏'处理文件'按钮！")
+            else:
+                st.info("请先上传 PDF 文件，或确保知识库中已有文档。")
+        
+        # 显示聊天历史
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        
+        # 输入框
+        # 允许在有 Knowledge Base 数据的情况下直接提问（需改进逻辑，假设KB有数据即可）
+        # 暂时保持 strict: processing_complete 必须为 True
+        if prompt := st.chat_input("请输入您的问题...", disabled=not st.session_state.processing_complete):
+            # 添加用户消息到聊天历史
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            
+            # 显示用户消息
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            
+            # 生成回答
+            with st.chat_message("assistant"):
+                with st.spinner("正在生成回答..."):
+                    logger.info(f"[问答流程] ========== 开始处理用户问题 ==========")
+                    logger.info(f"[问答流程] 用户问题: {prompt}")
+                    
+                    try:
+                        # 运行工作流
+                        result = run_workflow(prompt)
+                        logger.info(f"[问答流程] 工作流执行完成 - 审计通过: {result['audit_passed']}")
+                        
+                        # 显示回答
+                        st.markdown(result["generated_answer"])
+                        
+                        # 显示审计结果
+                        if result["audit_passed"]:
+                            st.success("✅ 回答已通过事实审计")
+                        else:
+                            st.error("❌ 回答未通过事实审计，已进行修正")
+                        
+                        # 添加助手消息到聊天历史
+                        st.session_state.chat_history.append({"role": "assistant", "content": result["generated_answer"]})
+                    except Exception as e:
+                        st.error(f"生成回答时发生错误: {str(e)}")
+                        logger.error(f"[问答流程] 错误: {str(e)}")
+
+    # 右侧：PDF 预览
+    with col2:
+        st.title("📖 PDF 预览")
+        if st.session_state.uploaded_files:
+            selected_file = st.selectbox(
+                "选择要预览的文件",
+                [file.name for file in st.session_state.uploaded_files]
+            )
+            if selected_file:
+                # Find the file object
+                file_obj = next((f for f in st.session_state.uploaded_files if f.name == selected_file), None)
+                if file_obj:
+                    base64_pdf = base64.b64encode(file_obj.getvalue()).decode("utf-8")
+                    pdf_display = f"<iframe src='data:application/pdf;base64,{base64_pdf}' width='100%' height='600' type='application/pdf'></iframe>"
+                    st.markdown(pdf_display, unsafe_allow_html=True)
+        else:
+            st.info("预览仅对当前上传的文件有效")
+
+# Tab 2: 知识库管理
+with tab_kb:
+    st.header("📚 知识库文档列表")
+    if st.button("刷新列表"):
+        st.rerun()
+    
+    docs = graph_store.get_all_documents()
+    if docs:
+        st.table(docs)
+    else:
+        st.info("知识库暂时为空")
+
+# 侧边栏处理逻辑更新
 with st.sidebar:
     st.title("📁 文件管理")
     
@@ -80,164 +194,58 @@ with st.sidebar:
         for file in st.session_state.uploaded_files:
             st.write(f"✅ {file.name}")
     
-    # 处理文件按钮
     if st.button("处理文件", key="process_button", disabled=not st.session_state.uploaded_files):
         with st.spinner("正在处理文件..."):
-            logger.info(f"[处理流程] ========== 开始处理文件，共 {len(st.session_state.uploaded_files)} 个文件 ==========")
+            logger.info(f"[处理流程] ========== 开始 ... ==========")
             
-            # 处理每个上传的文件
+            processed_any = False
+            
             for file in st.session_state.uploaded_files:
+                file_bytes = file.getvalue()
+                file_hash = get_file_hash(file_bytes)
+                
+                # Check Deduplication
+                existing_doc = graph_store.get_document(file_hash)
+                if existing_doc:
+                    st.success(f"📄 {file.name} 已存在于知识库，无需重复处理 (Hash: {file_hash[:8]}...)")
+                    logger.info(f"[处理流程] 文件跳过 (已存在): {file.name}")
+                    continue
+                
+                # Process New File
+                processed_any = True
                 file_path = os.path.join(st.session_state.temp_dir, file.name)
-                logger.info(f"[处理流程] ========== 开始处理文件: {file.name} ==========")
+                with open(file_path, "wb") as f:
+                    f.write(file_bytes)
                 
-                # 1. 解析 PDF
+                # 1. Parse
                 st.write(f"正在解析文件：{file.name}")
-                logger.info(f"[步骤1-PDF解析] 开始解析PDF文件: {file_path}")
                 document_blocks = parser.process_pdf(file_path, gemini_client)
-                logger.info(f"[步骤1-PDF解析] PDF解析完成，提取到 {len(document_blocks)} 个文档块")
                 
-                # 记录每个块的详细内容
-                logger.info(f"[步骤1-PDF解析] ========== 文档块详细内容 ==========")
-                for idx, block in enumerate(document_blocks):
-                    logger.info(f"[步骤1-PDF解析] 块 {idx+1} - 类型: {block['type']}, 页码: {block['page']}, 分级: {block['tier']}")
-                    content = block.get('verified_content', block.get('content', ''))
-                    logger.info(f"[步骤1-PDF解析] 块 {idx+1} 内容长度: {len(content)} 字符")
-                    logger.info(f"[步骤1-PDF解析] 块 {idx+1} 内容预览: {content[:200]}...")
-                    if 'coordinates' in block:
-                        logger.info(f"[步骤1-PDF解析] 块 {idx+1} 坐标: {block['coordinates']}")
-                logger.info(f"[步骤1-PDF解析] ========== 文档块详细内容结束 ==========")
-                
-                # 2. 构建知识图谱
+                # 2. Graph
                 st.write(f"正在构建图谱：{file.name}")
-                logger.info(f"[步骤2-图谱构建] 开始构建知识图谱")
-                graph_stats = graph_builder.build_graph_from_blocks(document_blocks, file.name)
-                logger.info(f"[步骤2-图谱构建] 图谱构建完成 - 处理块数: {graph_stats['processed_blocks']}, 创建实体数: {graph_stats['entities_created']}, 创建关系数: {graph_stats['relations_created']}")
+                graph_builder.build_graph_from_blocks(document_blocks, file.name)
                 
-                # 3. 将文档块添加到向量存储
+                # 3. Vector
                 st.write(f"正在添加到向量库：{file.name}")
-                logger.info(f"[步骤3-向量存储] 开始添加文档块到向量库")
-                added_count = 0
-                failed_count = 0
-                for idx, block in enumerate(document_blocks):
+                for block in document_blocks:
                     try:
-                        content = block.get('verified_content', block.get('content', ''))
-                        logger.info(f"[步骤3-向量存储] 添加块 {idx+1} - 类型: {block['type']}, 页码: {block['page']}, 内容长度: {len(content)} 字符")
-                        logger.debug(f"[步骤3-向量存储] 块 {idx+1} 完整内容: {content}")
-                        
-                        point_id = vector_store.add_document_block(block, file.name)
-                        added_count += 1
-                        logger.info(f"[步骤3-向量存储] 块 {idx+1} 添加成功 - 点ID: {point_id}")
-                    except Exception as e:
-                        failed_count += 1
-                        logger.error(f"[步骤3-向量存储] 块 {idx+1} 添加失败: {str(e)}")
-                logger.info(f"[步骤3-向量存储] 向量库添加完成，成功: {added_count}, 失败: {failed_count}, 总计: {len(document_blocks)}")
+                        vector_store.add_document_block(block, file.name)
+                    except:
+                        pass
                 
-                # 获取向量库统计信息
-                collection_info = vector_store.get_collection_info()
-                logger.info(f"[步骤3-向量存储] 向量库统计 - 点数: {collection_info.get('points_count', 'N/A')}, 向量数: {collection_info.get('vectors_count', 'N/A')}")
-                
-                logger.info(f"[处理流程] ========== 文件 {file.name} 处理完成 ==========")
+                # 4. Save Metadata
+                graph_store.add_document(
+                    doc_hash=file_hash,
+                    filename=file.name,
+                    size=file.size,
+                    upload_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                )
+                logger.info(f"[处理流程] 文件处理完成并保存元数据: {file.name}")
             
-            # 标记处理完成
             st.session_state.processing_complete = True
-            logger.info(f"[处理流程] ========== 所有文件处理完成 ==========")
-            st.success("所有文件处理完成！")
-    
-    # 清除会话按钮
-    if st.button("清除会话", key="clear_button"):
-        # 清除会话状态
-        st.session_state.uploaded_files = []
-        st.session_state.chat_history = []
-        st.session_state.processing_complete = False
-        
-        # 清除临时目录
-        for file in os.listdir(st.session_state.temp_dir):
-            os.remove(os.path.join(st.session_state.temp_dir, file))
-        
-        st.success("会话已清除！")
+            st.success("处理流程结束！")
+            st.rerun()
 
-# 主界面：对话和 PDF 预览
-col1, col2 = st.columns([2, 1])
-
-# 左侧：对话界面
-with col1:
-    st.title("🧠 IC/BCD 多模态知识库系统")
-    
-    # 显示处理状态
-    if st.session_state.processing_complete:
-        st.success("文件处理完成，可以开始提问！")
-    else:
-        if st.session_state.uploaded_files:
-            st.warning("请先点击'处理文件'按钮，处理完成后再提问！")
-        else:
-            st.info("请先上传 PDF 文件！")
-    
-    # 显示聊天历史
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
-    # 输入框
-    if prompt := st.chat_input("请输入您的问题...", disabled=not st.session_state.processing_complete):
-        # 添加用户消息到聊天历史
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        
-        # 显示用户消息
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        
-        # 生成回答
-        with st.chat_message("assistant"):
-            with st.spinner("正在生成回答..."):
-                logger.info(f"[问答流程] ========== 开始处理用户问题 ==========")
-                logger.info(f"[问答流程] 用户问题: {prompt}")
-                
-                # 运行工作流
-                result = run_workflow(prompt)
-                logger.info(f"[问答流程] 工作流执行完成 - 审计通过: {result['audit_passed']}")
-                
-                # 显示回答
-                st.markdown(result["generated_answer"])
-                logger.info(f"[问答流程] 生成的回答长度: {len(result['generated_answer'])} 字符")
-                
-                # 显示审计结果
-                if result["audit_passed"]:
-                    st.success("✅ 回答已通过事实审计")
-                    logger.info(f"[问答流程] 回答已通过事实审计")
-                else:
-                    st.error("❌ 回答未通过事实审计，已进行修正")
-                    logger.warning(f"[问答流程] 回答未通过事实审计，已进行修正")
-                
-                # 添加助手消息到聊天历史
-                st.session_state.chat_history.append({"role": "assistant", "content": result["generated_answer"]})
-                logger.info(f"[问答流程] ========== 问题处理完成 ==========")
-
-# 右侧：PDF 预览
-with col2:
-    st.title("📖 PDF 预览")
-    
-    if st.session_state.uploaded_files:
-        # 选择要预览的文件
-        selected_file = st.selectbox(
-            "选择要预览的文件",
-            [file.name for file in st.session_state.uploaded_files]
-        )
-        
-        # 预览 PDF
-        if selected_file:
-            file_path = os.path.join(st.session_state.temp_dir, selected_file)
-            
-            # 读取 PDF 文件并转换为 Base64
-            with open(file_path, "rb") as f:
-                pdf_bytes = f.read()
-            
-            base64_pdf = base64.b64encode(pdf_bytes).decode("utf-8")
-            pdf_display = f"<iframe src='data:application/pdf;base64,{base64_pdf}' width='100%' height='600' type='application/pdf'></iframe>"
-            
-            # 显示 PDF
-            st.markdown(pdf_display, unsafe_allow_html=True)
-    else:
-        st.info("请先上传 PDF 文件！")
 
 # 页脚
 st.markdown("---")

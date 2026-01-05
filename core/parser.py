@@ -5,6 +5,9 @@ import base64
 import os
 import logging
 
+import logging
+from docling_core.types.doc import TableItem, PictureItem, TextItem
+
 logger = logging.getLogger(__name__)
 
 class PDFParser:
@@ -12,7 +15,25 @@ class PDFParser:
         """
         初始化 PDF 解析器
         """
-        self.converter = DocumentConverter()
+        # Configure pipeline options for CUDA acceleration
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
+        
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.accelerator_options = AcceleratorOptions(
+            num_threads=4, device=AcceleratorDevice.CUDA
+        )
+        pipeline_options.do_ocr = True
+        pipeline_options.do_table_structure = True
+        pipeline_options.table_structure_options.do_cell_matching = True
+        
+        from docling.datamodel.base_models import InputFormat
+        from docling.document_converter import PdfFormatOption
+        
+        self.converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
         
         # 定义分级标签的关键词
         self.tier_keywords = {
@@ -100,21 +121,46 @@ class PDFParser:
                         """递归处理GroupItem的children"""
                         if hasattr(group_item, 'children'):
                             for child in group_item.children:
-                                logger.debug(f"[块提取] 处理GroupItem子元素，类型: {type(child).__name__}")
+                                # logger.debug(f"[块提取] 处理GroupItem子元素，类型: {type(child).__name__}")
+                                
+                                
+                                # 尝试解析 RefItem
+                                if hasattr(child, 'resolve'):
+                                    try:
+                                        resolved_child = child.resolve(document)
+                                        if resolved_child:
+                                            # logger.debug(f"[块提取] RefItem解析为: {type(resolved_child).__name__}")
+                                            child = resolved_child
+                                    except Exception as e:
+                                        logger.warning(f"[块提取] 解析RefItem失败: {str(e)}")
                                 
                                 # 检查子元素是否有type属性
                                 if hasattr(child, 'type'):
-                                    logger.debug(f"[块提取] 子元素type属性: {child.type}")
+                                    # logger.debug(f"[块提取] 子元素type属性: {child.type}")
+                                    pass
                                 
-                                # 处理不同类型的子元素
+                                # 尝试从元素中提取页码
+                                current_page = page_num
+                                if hasattr(child, 'prov') and child.prov:
+                                    # 尝试获取第一页
+                                    try:
+                                        if hasattr(child.prov, 'page_no'):
+                                            current_page = child.prov.page_no
+                                        elif isinstance(child.prov, list) and len(child.prov) > 0:
+                                            current_page = child.prov[0].page_no
+                                    except:
+                                        pass
+                                
+                                # logic change: Try to process as a block FIRST
+                                processed_block = self._process_block(child, current_page, document)
+                                if processed_block:
+                                    blocks.append(processed_block)
+                                    # If processed successfully (has content), do not recurse into its children (e.g. spans)
+                                    continue
+                                
+                                # If not processed (e.g. GroupItem with no direct content), recurse if it has children
                                 if hasattr(child, 'children'):
-                                    # 如果子元素有children，递归处理
-                                    process_group_item(child, page_num)
-                                else:
-                                    # 否则直接处理
-                                    processed_block = self._process_block(child, page_num)
-                                    if processed_block:
-                                        blocks.append(processed_block)
+                                    process_group_item(child, current_page)
                     
                     process_group_item(document.body)
         
@@ -132,7 +178,7 @@ class PDFParser:
                 else:
                     page_num = 1  # 默认页码为1
                 
-                processed_block = self._process_block(block, page_num)
+                processed_block = self._process_block(block, page_num, document)
                 if processed_block:
                     blocks.append(processed_block)
         
@@ -176,12 +222,12 @@ class PDFParser:
                 if hasattr(page_value, 'blocks'):
                     logger.debug(f"[块提取] 页面 {page_num} 包含 {len(page_value.blocks)} 个块")
                     for block in page_value.blocks:
-                        processed_block = self._process_block(block, page_num)
+                        processed_block = self._process_block(block, page_num, document)
                         if processed_block:
                             blocks.append(processed_block)
                 elif hasattr(page_value, 'block'):
                     # 可能是单数形式
-                    processed_block = self._process_block(page_value.block, page_num)
+                    processed_block = self._process_block(page_value.block, page_num, document)
                     if processed_block:
                         blocks.append(processed_block)
                 else:
@@ -195,13 +241,13 @@ class PDFParser:
                             if hasattr(content_value, '__iter__') and not isinstance(content_value, (str, bytes)):
                                 # 可迭代对象，遍历每个元素
                                 for element in content_value:
-                                    processed_block = self._process_block(element, page_num)
+                                    processed_block = self._process_block(element, page_num, document)
                                     if processed_block:
                                         blocks.append(processed_block)
                                         content_found = True
                             else:
                                 # 单个对象，直接处理
-                                processed_block = self._process_block(content_value, page_num)
+                                processed_block = self._process_block(content_value, page_num, document)
                                 if processed_block:
                                     blocks.append(processed_block)
                                     content_found = True
@@ -212,7 +258,7 @@ class PDFParser:
                     if not content_found:
                         # 尝试将整个页面作为整体块处理
                         logger.debug(f"[块提取] 尝试将页面 {page_num} 作为整体块处理")
-                        processed_block = self._process_block(page_value, page_num)
+                        processed_block = self._process_block(page_value, page_num, document)
                         if processed_block:
                             blocks.append(processed_block)
         
@@ -224,11 +270,11 @@ class PDFParser:
             
             if isinstance(document.content, list):
                 for item in document.content:
-                    processed_block = self._process_block(item, 1)
+                    processed_block = self._process_block(item, 1, document)
                     if processed_block:
                         blocks.append(processed_block)
             else:
-                processed_block = self._process_block(document.content, 1)
+                processed_block = self._process_block(document.content, 1, document)
                 if processed_block:
                     blocks.append(processed_block)
         else:
@@ -237,7 +283,7 @@ class PDFParser:
         logger.info(f"[块提取] 块提取完成，共提取 {len(blocks)} 个块")
         return blocks
     
-    def _process_block(self, block, page_num):
+    def _process_block(self, block, page_num, document):
         """
         处理单个块并返回处理后的块数据
         
@@ -282,6 +328,70 @@ class PDFParser:
         # 直接跳过根据块类型处理内容的部分，先尝试通用内容提取方式
         content_found = False
         
+        # 优先处理特定类型的块 (TableItem, PictureItem)，避免被通用的 text 属性捕获
+        if isinstance(block, TableItem) or block_type == "table":
+            # 表格块，优先尝试 export_to_markdown
+            try:
+                table_text = ""
+                if hasattr(block, 'export_to_markdown'):
+                    table_text = block.export_to_markdown()
+                    logger.debug(f"[块处理] 使用 export_to_markdown 提取表格成功")
+                elif hasattr(block, 'rows'):
+                    # 旧逻辑兼容
+                    table_content = []
+                    for row in block.rows:
+                        if hasattr(row, 'cells'):
+                            row_content = [cell.text for cell in row.cells]
+                            table_content.append(row_content)
+                    if table_content:
+                        table_text = "\n".join(["\t".join(row) for row in table_content])
+                
+                if table_text.strip():
+                    block_data["content"] = table_text
+                    block_data["tier"] = "YELLOW"  # 强制标记为 YELLOW 以触发 Table Specialist
+                    block_data["type"] = "table"   # 确保类型正确
+                    content_found = True
+                    logger.debug(f"[块处理] 表格块处理成功 (优先) - 页码: {page_num}")
+            except Exception as e:
+                logger.warning(f"[块处理] 表格块优先处理失败: {str(e)}")
+
+        if not content_found and (isinstance(block, PictureItem) or block_type == "image"):
+            # 图像块，提取图像内容
+            try:
+                # 获取图像的 Base64 编码
+                from docling_core.types.doc import ImageRefMode
+                image_base64 = None
+                
+                # 情况1: block.image 是 ImageRef，有 uri 且是 data uri
+                if hasattr(block, 'image') and hasattr(block.image, 'uri') and block.image.uri and block.image.uri.startswith('data:image'):
+                        image_base64 = block.image.uri.split(',')[1]
+                
+                # 情况2: block.image 是 bytes (可能是旧版本或特定情况)
+                elif hasattr(block, 'image') and isinstance(block.image, bytes):
+                    image_base64 = base64.b64encode(block.image).decode("utf-8")
+                
+                # 情况3: 使用 get_image 方法 (需要 document)
+                elif hasattr(block, 'get_image') and document:
+                    try:
+                        pil_image = block.get_image(document)
+                        if pil_image:
+                            # 转换为 base64
+                            from io import BytesIO
+                            buffered = BytesIO()
+                            pil_image.save(buffered, format="PNG")
+                            image_base64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+                    except Exception as e:
+                        logger.debug(f"[块处理] get_image 失败: {e}")
+
+                if image_base64:
+                    block_data["content"] = image_base64
+                    block_data["tier"] = "YELLOW"
+                    block_data["type"] = "image"
+                    content_found = True
+                    logger.debug(f"[块处理] 图像块处理成功 (优先) - 页码: {page_num}")
+            except Exception as e:
+                logger.warning(f"[块处理] 图像块优先处理失败: {str(e)}")
+
         # 优先尝试多种内容提取方式，不依赖于块类型
         logger.debug(f"[块处理] 尝试多种内容提取方式，块类型: {block_type}")
         
@@ -299,26 +409,33 @@ class PDFParser:
             ('data', lambda b: getattr(b, 'data', None)),
         ]
         
-        for method_name, extractor in extraction_methods:
-            try:
-                content = extractor(block)
-                if content and str(content).strip():
-                    # 确保内容是字符串
-                    if not isinstance(content, str):
-                        content = str(content)
-                    block_data["content"] = content
-                    block_data["tier"] = self.classify_block(content)
-                    content_found = True
-                    logger.debug(f"[块处理] 使用{method_name}属性获取内容成功 - 页码: {page_num}, 内容长度: {len(content)}")
-                    break
-            except Exception as e:
-                logger.debug(f"[块处理] 使用{method_name}属性获取内容失败: {str(e)}")
-        
-        # 如果还是没有找到内容，再根据块类型尝试特殊处理
         if not content_found:
-            logger.debug(f"[块处理] 根据块类型 {block_type} 进行特殊处理")
+            for method_name, extractor in extraction_methods:
+                try:
+                    content = extractor(block)
+                    if content and str(content).strip():
+                        # 确保内容是字符串
+                        if not isinstance(content, str):
+                            content = str(content)
+                        block_data["content"] = content
+                        block_data["tier"] = self.classify_block(content)
+                        
+                        # Update type if it was unknown and we found text
+                        if block_data["type"] == "unknown" and method_name in ['text', 'content', 'text_content', 'full_text', 'paragraphs', 'lines', 'string_value']:
+                            block_data["type"] = "text"
+                        
+                        content_found = True
+                        logger.debug(f"[块处理] 使用{method_name}属性获取内容成功 - 页码: {page_num}, 内容长度: {len(content)}")
+                        break
+                except Exception as e:
+                    logger.debug(f"[块处理] 使用{method_name}属性获取内容失败: {str(e)}")
+        
+        # 如果还是没有找到内容，再根据块类型尝试特殊处理 (Fallback for Text)
+        if not content_found:
+            logger.debug(f"[块处理] 根据块类型 {block_type} 进行特殊处理 (Fallback)")
             
-            if block_type == "text":
+            # 使用 isinstance 检查类型，更健壮
+            if isinstance(block, TextItem) or block_type == "text":
                 # 文本块，提取文本内容
                 if hasattr(block, 'lines'):
                     try:
@@ -330,36 +447,6 @@ class PDFParser:
                             logger.debug(f"[块处理] 文本块处理成功 - 页码: {page_num}, 内容长度: {len(text_content)}")
                     except Exception as e:
                         logger.warning(f"[块处理] 文本块处理失败: {str(e)}")
-            elif block_type == "table":
-                # 表格块，提取表格内容
-                if hasattr(block, 'rows'):
-                    try:
-                        table_content = []
-                        for row in block.rows:
-                            if hasattr(row, 'cells'):
-                                row_content = [cell.text for cell in row.cells]
-                                table_content.append(row_content)
-                        if table_content:
-                            # 将表格转换为文本格式
-                            table_text = "\n".join(["\t".join(row) for row in table_content])
-                            block_data["content"] = table_text
-                            block_data["tier"] = "YELLOW"  # 表格默认为 YELLOW 级
-                            content_found = True
-                            logger.debug(f"[块处理] 表格块处理成功 - 页码: {page_num}, 行数: {len(table_content)}")
-                    except Exception as e:
-                        logger.warning(f"[块处理] 表格块处理失败: {str(e)}")
-            elif block_type == "image":
-                # 图像块，提取图像内容
-                if hasattr(block, 'image') and block.image:
-                    try:
-                        # 获取图像的 Base64 编码
-                        image_base64 = base64.b64encode(block.image).decode("utf-8")
-                        block_data["content"] = image_base64
-                        block_data["tier"] = "YELLOW"  # 图像默认为 YELLOW 级
-                        content_found = True
-                        logger.debug(f"[块处理] 图像块处理成功 - 页码: {page_num}")
-                    except Exception as e:
-                        logger.warning(f"[块处理] 图像块处理失败: {str(e)}")
         
         # 最终兜底：尝试将整个块转换为字符串
         if not content_found:
@@ -452,10 +539,10 @@ class PDFParser:
                     # YELLOW 块：单次解析
                     if block["type"] == "table":
                         logger.debug(f"[QA验证] YELLOW块 {idx+1} 表格解析")
-                        # 表格转换为文本格式进行解析
-                        table_text = "\n".join(["\t".join(row) for row in block["content"]])
+                        # 表格内容已经是 Markdown 字符串 (由 _process_block 处理)
+                        table_markdown = block["content"]
                         verified_text = gemini_client.generate_text(
-                            f"请准确解析以下工艺参数表格：\n{table_text}",
+                            f"请准确解析以下工艺参数表格(Markdown格式)，提取关键参数和层级关系：\n{table_markdown}",
                             use_pro=True
                         )
                         block["verified_content"] = verified_text

@@ -44,11 +44,19 @@ class GeminiClient:
         生成文本内容
         """
         model = self.pro_model if use_pro else self.flash_model
-        response = self.client.models.generate_content(
-            model=model,
-            contents=prompt
-        )
-        return response.text
+        try:
+            response = self.client.models.generate_content(
+                model=model,
+                contents=prompt
+            )
+            if hasattr(response, 'text') and response.text:
+                return response.text
+            else:
+                logging.warning(f"[GeminiClient] 生成内容为空 or 被拦截。Response: {response}")
+                return ""
+        except Exception as e:
+            logging.error(f"[GeminiClient] 生成失败: {e}")
+            return ""
     
     def generate_multimodal(self, prompt: str, image_path: str = None, image_base64: str = None, use_pro: bool = True) -> str:
         """

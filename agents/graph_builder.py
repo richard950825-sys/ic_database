@@ -41,12 +41,24 @@ class GraphBuilder:
         for idx, block in enumerate(document_blocks):
             # 处理所有有内容的块，不再只限制text和table类型
             if "verified_content" in block and block["verified_content"]:
-                logger.info(f"[图谱构建] 处理块 {idx+1}/{len(document_blocks)} - 类型: {block['type']}, 页码: {block['page']}, 分级: {block['tier']}")
+                logger.info(f"[图谱构建] 处理块 {idx+1}/{len(document_blocks)} - 类型: {block['type']}, 页码: {block['page']}, 分级: {block.get('tier', 'N/A')}")
                 logger.debug(f"[图谱构建] 块内容前100字符: {block['verified_content'][:100]}...")
                 
                 # 提取实体和关系
                 entities_relations = self.extract_entities_relations(block["verified_content"])
                 logger.info(f"[图谱构建] 块 {idx+1} 提取到 {len(entities_relations)} 个实体关系")
+                
+                # 创建块节点
+                import hashlib
+                block_content = block["verified_content"]
+                block_id = f"block_{hashlib.md5(block_content.encode('utf-8')).hexdigest()}"
+                self.graph_store.create_block(
+                    block_id=block_id,
+                    file_name=file_name,
+                    page=block.get("page", 1),
+                    content=block_content,
+                    block_type=block.get("type", "unknown")
+                )
                 
                 # 如果提取到了实体和关系，保存到图数据库
                 if entities_relations:
@@ -54,6 +66,11 @@ class GraphBuilder:
                     logger.debug(f"[图谱构建] 准备保存的实体关系列表: {entities_relations}")
                     
                     self.graph_store.batch_create_entities_and_relations(entities_relations)
+                    
+                    # 建立实体与块的关系
+                    for relation in entities_relations:
+                        self.graph_store.create_relation_entity_to_block(relation["source"], block_id)
+                        self.graph_store.create_relation_entity_to_block(relation["target"], block_id)
                     
                     unique_entities = len(set([er["source"] for er in entities_relations] + [er["target"] for er in entities_relations]))
                     stats["entities_created"] += unique_entities

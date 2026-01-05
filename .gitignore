@@ -1,4 +1,26 @@
+# Environment
 .env
-__pycache__
+venv/
+__pycache__/
+
+# Logs and Output
+*.log
+
+*.txt
+!requirements.txt
+
+
+# Data
+neo4j_data/
+qdrant_data/
+*.pdf
+
+# Scripts (Test, Debug, Verification)
 test_*.py
-test_*.log
+reproduction_docling.py
+reset_db.py
+verify_*.py
+pdf_test.py
+debug_*.py
+inspect_qdrant.py
+.trae/

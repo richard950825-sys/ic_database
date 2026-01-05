@@ -62,6 +62,56 @@ class GraphStore:
                 target=target_entity,
                 relation=relation_type
             )
+            
+    def create_block(self, block_id: str, file_name: str, page: int, content: str, block_type: str) -> None:
+        """
+        创建文档块节点
+        
+        Args:
+            block_id: 块唯一标识
+            file_name: 文件名
+            page: 页码
+            content: 块内容
+            block_type: 块类型
+        """
+        with self.driver.session() as session:
+            session.run(
+                """
+                MERGE (b:Entity {name: $block_id})
+                SET b.type = 'Block',
+                    b.file_name = $file_name,
+                    b.page = $page,
+                    b.content = $content,
+                    b.block_type = $block_type
+                """,
+                block_id=block_id,
+                file_name=file_name,
+                page=page,
+                content=content,
+                block_type=block_type
+            )
+            
+    def create_relation_entity_to_block(self, entity_name: str, block_id: str, relation_type: str = "MENTIONED_IN") -> None:
+        """
+        创建实体到文档块的关系（表明实体出自哪个块）
+        
+        Args:
+            entity_name: 实体名称
+            block_id: 文档块ID
+            relation_type: 关系类型（默认：MENTIONED_IN）
+        """
+        with self.driver.session() as session:
+            session.run(
+                """
+                MERGE (e:Entity {name: $entity})
+                MERGE (b:Entity {name: $block_id})
+                MERGE (e)-[r:RELATION]->(b)
+                SET r.type = $relation
+                """,
+                entity=entity_name,
+                block_id=block_id,
+                relation=relation_type
+            )
     
     def batch_create_entities_and_relations(self, entities_relations: List[Dict[str, Any]]) -> None:
         """
@@ -308,3 +358,49 @@ class GraphStore:
                 "entity_count": entity_count,
                 "relation_count": relation_count
             }
+
+    def add_document(self, doc_hash: str, filename: str, size: int, upload_time: str) -> None:
+        """
+        添加文档元数据节点
+        """
+        with self.driver.session() as session:
+            session.run(
+                """
+                MERGE (d:Document {hash: $hash})
+                SET d.filename = $filename,
+                    d.size = $size,
+                    d.upload_time = $upload_time,
+                    d.status = 'processed'
+                """,
+                hash=doc_hash,
+                filename=filename,
+                size=size,
+                upload_time=upload_time
+            )
+            logger.info(f"[图数据库] 文档元数据已保存: {filename} (hash: {doc_hash})")
+
+    def get_document(self, doc_hash: str) -> Dict[str, Any]:
+        """
+        根据哈希获取文档元数据
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                "MATCH (d:Document {hash: $hash}) RETURN d",
+                hash=doc_hash
+            )
+            record = result.single()
+            if record:
+                doc = dict(record["d"])
+                logger.info(f"[图数据库] 找到已存在的文档: {doc.get('filename')} (hash: {doc_hash})")
+                return doc
+            return None
+
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """
+        获取所有已处理的文档
+        """
+        with self.driver.session() as session:
+            result = session.run("MATCH (d:Document) RETURN d ORDER BY d.upload_time DESC")
+            documents = [dict(record["d"]) for record in result]
+            return documents
+
