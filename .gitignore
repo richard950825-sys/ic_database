@@ -23,4 +23,6 @@ verify_*.py
 pdf_test.py
 debug_*.py
 inspect_qdrant.py
-.trae/
+.gitignore
+
+
