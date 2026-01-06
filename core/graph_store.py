@@ -18,7 +18,24 @@ class GraphStore:
             uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
             auth=(os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", "password"))
         )
-        logger.info("[图数据库] Neo4j 连接初始化完成")
+        self.verify_connectivity()
+
+    def verify_connectivity(self):
+        try:
+            with self.driver.session() as session:
+                session.run("RETURN 1")
+            logger.info("[图数据库] Neo4j 连接验证成功")
+        except Exception as e:
+            logger.error(f"[图数据库] Neo4j 连接验证失败: {e}")
+
+    def query(self, query: str, parameters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        执行通用的 Cypher 查询
+        """
+        with self.driver.session() as session:
+            result = session.run(query, parameters)
+            return [record.data() for record in result]
+
     
     def close(self):
         """

@@ -156,6 +156,18 @@ class VectorStore:
         logger.debug(f"[向量库] 文档块添加成功 - ID: {point_id}")
         return point_id
     
+    def add_documents(self, blocks: List[Dict[str, Any]], file_name: str = "unknown"):
+        """
+        批量添加文档块到向量存储
+        """
+        count = 0
+        for block in blocks:
+            # 优先使用 block 中可能自带的 file_name，否则使用参数传入的
+            fname = block.get("file_name", file_name)
+            self.add_document_block(block, fname)
+            count += 1
+        return count
+    
     def search_similar(self, query: str, limit: int = 5, filter_criteria: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """
         搜索相似的文档块

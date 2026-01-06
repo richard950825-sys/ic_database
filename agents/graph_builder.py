@@ -14,13 +14,15 @@ class GraphBuilder:
         self.graph_store = GraphStore()
         logger.info("[图谱构建器] 初始化完成")
     
-    def build_graph_from_blocks(self, document_blocks: List[Dict[str, Any]], file_name: str) -> Dict[str, Any]:
+    
+    def build_graph_from_blocks(self, document_blocks: List[Dict[str, Any]], file_name: str, progress_callback=None) -> Dict[str, Any]:
         """
         从文档块构建知识图谱 (并行化)
         
         Args:
             document_blocks: 文档块列表
             file_name: 文件名
+            progress_callback: 进度回调函数 callback(current, total, msg)
             
         Returns:
             构建结果，包含创建的实体数、关系数等
@@ -46,8 +48,11 @@ class GraphBuilder:
         valid_blocks = [(idx, block) for idx, block in enumerate(document_blocks) 
                        if "verified_content" in block and block["verified_content"]]
         
-        logger.info(f"[图谱构建] 需处理的有效块数: {len(valid_blocks)} (总块数: {len(document_blocks)})")
+        total_valid = len(valid_blocks)
+        logger.info(f"[图谱构建] 需处理的有效块数: {total_valid} (总块数: {len(document_blocks)})")
         
+        if progress_callback: progress_callback(0, total_valid, "开始提取实体关系...")
+
         with ThreadPoolExecutor(max_workers=5) as executor:
             # 提交任务
             future_to_block = {
@@ -66,11 +71,16 @@ class GraphBuilder:
                         stats["relations_created"] += result["relations_count"]
                 except Exception as exc:
                     logger.error(f"[图谱构建] 块 {idx+1} 处理产生异常: {exc}")
-        
+                
+                # Update progress
+                if progress_callback:
+                    progress_callback(stats["processed_blocks"], total_valid, f"提取实体 (块 {idx+1})")
+
         logger.info(f"[图谱构建] ========== 图谱构建完成 ==========")
         logger.info(f"[图谱构建] 处理块数: {stats['processed_blocks']}/{len(valid_blocks)}, 创建实体数: {stats['entities_created']}, 创建关系数: {stats['relations_created']}")
         
         return stats
+
 
     def _process_single_block(self, block: Dict[str, Any], file_name: str, idx: int) -> Dict[str, Any]:
         """

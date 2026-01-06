@@ -508,8 +508,10 @@ class PDFParser:
                     block["verification_passed"] = True
                 elif block["type"] == "image":
                     logger.debug(f"[QA验证] YELLOW块 {idx+1} 图像描述生成")
+                    # Hybrid Strategy: Since OCR is disabled, scanned tables appear as images.
+                    # We expressly ask the LLM to output Markdown if it sees a table.
                     image_description = gemini_client.generate_multimodal(
-                        prompt="请详细描述以下 IC/BCD 工艺相关图像的内容，包括结构、参数、特性等：",
+                        prompt="请分析这张 IC/BCD 工艺相关的图片。\n1. 如果图片是表格（包含有线或无线的表结构），请务必将其转换为 Markdown 表格格式输出。\n2. 如果是电路图、截面图或示意图，请详细描述其结构、关键参数和特性。\n3. 如果是普通文本截图，请提取其中的文字内容。",
                         image_base64=block["content"],
                         use_pro=True
                     )
@@ -531,11 +533,42 @@ class PDFParser:
             
         return block
 
-    def tiered_qa_verification(self, blocks: List[Dict[str, Any]], gemini_client) -> List[Dict[str, Any]]:
+    
+    def process_pdf(self, file_path: str, gemini_client, progress_callback=None) -> List[Dict[str, Any]]:
+        """
+        完整处理 PDF 文件的流程
+        
+        Args:
+            file_path: PDF 文件路径
+            gemini_client: Gemini 客户端实例
+            progress_callback: 进度回调函数 callback(current, total, msg)
+            
+        Returns:
+            处理后的文档块列表
+        """
+        logger.info(f"[PDF处理] ========== 开始处理PDF文件: {file_path} ==========")
+        
+        if progress_callback: progress_callback(0, 0, "正在解析 PDF 结构...")
+
+        # 1. 解析 PDF
+        document = self.parse_pdf(file_path)
+        
+        # 2. 提取文档块
+        blocks = self.extract_document_blocks(document)
+        
+        # 3. 分级 QA 验证
+        if progress_callback: progress_callback(0, len(blocks), "开始 QA 验证...")
+        verified_blocks = self.tiered_qa_verification(blocks, gemini_client, progress_callback)
+        
+        logger.info(f"[PDF处理] ========== PDF处理完成，返回 {len(verified_blocks)} 个验证后的块 ==========")
+        return verified_blocks
+
+    def tiered_qa_verification(self, blocks: List[Dict[str, Any]], gemini_client, progress_callback=None) -> List[Dict[str, Any]]:
         """
         对不同级别的块进行不同程度的 QA 验证 (并行优化版)
         """
-        logger.info(f"[QA验证] 开始QA验证，共 {len(blocks)} 个块 (并行模式)")
+        total_blocks = len(blocks)
+        logger.info(f"[QA验证] 开始QA验证，共 {total_blocks} 个块 (并行模式)")
         
         tier_counts = {"RED": 0, "YELLOW": 0, "GREEN": 0}
         for block in blocks:
@@ -549,9 +582,11 @@ class PDFParser:
         import concurrent.futures
         
         verified_blocks = []
-        # 限制并发数为 5，避免触发 API 速率限制
+        # 限制并发数
         max_workers = 5
         
+        processed_count = 0
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # 提交所有任务
             future_to_idx = {
@@ -562,15 +597,20 @@ class PDFParser:
             # 收集结果
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
+                processed_count += 1
                 try:
                     result_block = future.result()
                     verified_blocks.append((idx, result_block))
                 except Exception as e:
                     logger.error(f"[QA验证] 线程执行异常 (块 {idx}): {e}")
-                    # Fallback logic if thread fails completely
+                    # Fallback
                     block = blocks[idx]
                     block["verified_content"] = str(block.get("content", ""))
                     verified_blocks.append((idx, block))
+                
+                # Update progress
+                if progress_callback:
+                    progress_callback(processed_count, total_blocks, f"验证块 {idx+1}")
 
         # 恢复原始顺序
         verified_blocks.sort(key=lambda x: x[0])
@@ -578,28 +618,4 @@ class PDFParser:
         
         logger.info(f"[QA验证] QA验证完成，处理 {len(verified_blocks)} 个块")
         return verified_blocks
-    
-    def process_pdf(self, file_path: str, gemini_client) -> List[Dict[str, Any]]:
-        """
-        完整处理 PDF 文件的流程
-        
-        Args:
-            file_path: PDF 文件路径
-            gemini_client: Gemini 客户端实例
-            
-        Returns:
-            处理后的文档块列表
-        """
-        logger.info(f"[PDF处理] ========== 开始处理PDF文件: {file_path} ==========")
-        
-        # 1. 解析 PDF
-        document = self.parse_pdf(file_path)
-        
-        # 2. 提取文档块
-        blocks = self.extract_document_blocks(document)
-        
-        # 3. 分级 QA 验证
-        verified_blocks = self.tiered_qa_verification(blocks, gemini_client)
-        
-        logger.info(f"[PDF处理] ========== PDF处理完成，返回 {len(verified_blocks)} 个验证后的块 ==========")
-        return verified_blocks
+
