@@ -96,8 +96,7 @@ class GeminiClient:
         """
         embedding = self.client.models.embed_content(
             model=os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"),
-            contents=text,
-            task_type="retrieval_document"
+            contents=text
         )
         return embedding.embedding
     

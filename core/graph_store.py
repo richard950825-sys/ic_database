@@ -167,9 +167,9 @@ class GraphStore:
         try:
             with self.driver.session() as session:
                 session.run(query, batch=valid_items)
-            logger.info(f"[图数据库] ✅ 批量插入成功: {len(valid_items)} 条关系")
+            logger.info(f"[图数据库] [SUCCESS] 批量插入成功: {len(valid_items)} 条关系")
         except Exception as e:
-            logger.error(f"[图数据库] ❌ 批量插入失败: {str(e)}")
+            logger.error(f"[图数据库] [FAILED] 批量插入失败: {str(e)}")
 
     
     def search_relations(self, entity_name: str, relation_type: str = None) -> List[Dict[str, Any]]:

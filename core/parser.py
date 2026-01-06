@@ -335,7 +335,7 @@ class PDFParser:
             try:
                 table_text = ""
                 if hasattr(block, 'export_to_markdown'):
-                    table_text = block.export_to_markdown()
+                    table_text = block.export_to_markdown(document)
                     logger.debug(f"[块处理] 使用 export_to_markdown 提取表格成功")
                 elif hasattr(block, 'rows'):
                     # 旧逻辑兼容
