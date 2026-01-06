@@ -15,14 +15,17 @@ class PDFParser:
         """
         初始化 PDF 解析器
         """
-        # Configure pipeline options for CUDA acceleration
+        from core.config import settings
         from docling.datamodel.pipeline_options import PdfPipelineOptions, AcceleratorOptions, AcceleratorDevice
         
         pipeline_options = PdfPipelineOptions()
         pipeline_options.accelerator_options = AcceleratorOptions(
             num_threads=4, device=AcceleratorDevice.CUDA
         )
-        pipeline_options.do_ocr = True
+        # Hybrid Parsing: 
+        # If USE_OCR=False, we skip dense OCR. Native text is extracted directly.
+        # Images (including scanned tables) are handled by Multimodal LLM later.
+        pipeline_options.do_ocr = settings.USE_OCR
         pipeline_options.do_table_structure = True
         pipeline_options.table_structure_options.do_cell_matching = True
         pipeline_options.generate_picture_images = True  # Ensure images are generated

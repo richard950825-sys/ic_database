@@ -13,6 +13,9 @@ class Settings(BaseModel):
     EXACT_MATCH_LIMIT: int = 3
     GRAPH_SEARCH_LIMIT: int = 50
     
+    # Parsing Settings
+    USE_OCR: bool = False
+    
     # Model Settings
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     QDRANT_COLLECTION: str = os.getenv("QDRANT_COLLECTION_NAME", "ic_bcd_knowledge_base")
