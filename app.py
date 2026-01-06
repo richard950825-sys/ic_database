@@ -13,6 +13,7 @@ import os
 import logging
 import hashlib
 from datetime import datetime
+import sys
 
 # ... (Previous imports remain, ensuring hashlib is at top)
 
@@ -23,15 +24,23 @@ def get_file_hash(file_bytes):
     return md5_hash.hexdigest()
 
 # ... (Logging setup remains)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('app_monitor.log'),
-        logging.StreamHandler()
-    ],
-    force=True
-)
+# Configure logging with explicit UTF-8 encoding
+logging.basicConfig(level=logging.INFO, handlers=[])  # Clear existing handlers
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# File Handler with UTF-8
+file_handler = logging.FileHandler('app_monitor.log', encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+root_logger.addHandler(file_handler)
+
+# Stream Handler with UTF-8 (only if not already handled by Streamlit, but explicit is safer)
+# We wrap stdout in a TextIOWrapper ensuring utf-8 if we want to be 100% sure,
+# or simply trust sys.stdout.reconfigure() we added in gemini_client.
+# But for StreamHandler, we can assume sys.stdout is safe now, OR we explicit set stream.
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+root_logger.addHandler(stream_handler)
 logger = logging.getLogger(__name__)
 
 # 设置页面标题和布局

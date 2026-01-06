@@ -6,6 +6,12 @@ from PIL import Image
 import io
 import logging
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
+import sys
+
+# Force UTF-8 encoding for Windows (fixes UnicodeEncodeError in logging)
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 
 load_dotenv()
 
@@ -39,7 +45,13 @@ class GeminiClient:
         if proxy_url:
             logging.info(f"[GeminiClient] 使用代理: {proxy_url}")
     
-    def generate_text(self, prompt: str, use_pro: bool = False) -> str:
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING)
+    )
+    def generate_text(self, prompt: str, use_pro: bool = False, **kwargs) -> str:
         """
         生成文本内容
         """
@@ -47,7 +59,8 @@ class GeminiClient:
         try:
             response = self.client.models.generate_content(
                 model=model,
-                contents=prompt
+                contents=prompt,
+                config=kwargs
             )
             if hasattr(response, 'text') and response.text:
                 return response.text
@@ -58,6 +71,12 @@ class GeminiClient:
             logging.error(f"[GeminiClient] 生成失败: {e}")
             return ""
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING)
+    )
     def generate_multimodal(self, prompt: str, image_path: str = None, image_base64: str = None, use_pro: bool = True) -> str:
         """
         生成多模态内容
@@ -90,15 +109,22 @@ class GeminiClient:
             logging.error(f"[GeminiClient] 多模态生成失败: {e}")
             return ""
     
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        reraise=True,
+        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING)
+    )
     def generate_embedding(self, text: str) -> list:
         """
         生成文本嵌入
         """
         embedding = self.client.models.embed_content(
             model=os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"),
-            contents=text
+            contents=text,
+            config={'output_dimensionality': int(os.getenv("GEMINI_EMBEDDING_DIMENSION", 768))}
         )
-        return embedding.embedding
+        return embedding.embeddings[0].values
     
     def extract_entities(self, text: str) -> list:
         """
