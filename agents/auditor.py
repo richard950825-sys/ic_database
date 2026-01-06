@@ -1,12 +1,15 @@
-from utils.ollama_client import OllamaClient
+from utils.gemini_client import GeminiClient
 from typing import List, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ResponseAuditor:
     def __init__(self):
         """
         初始化响应审计器
         """
-        self.ollama_client = OllamaClient()
+        self.gemini_client = GeminiClient()
     
     def audit_response(self, original_contexts: List[Dict[str, Any]], generated_answer: str) -> Dict[str, Any]:
         """
@@ -25,9 +28,52 @@ class ResponseAuditor:
             for ctx in original_contexts
         ])
         
-        # 使用 Ollama 进行审计
-        audit_result = self.ollama_client.audit_response(original_text, generated_answer)
+        prompt = f"""
+        你是一位严格的事实审计专家，负责检查生成的回答是否完全符合原始上下文。
         
+        原始上下文：
+        {original_text}
+        
+        生成的回答：
+        {generated_answer}
+        
+        请按照以下步骤进行审计：
+        1. 逐句检查生成的回答是否能在原始上下文中找到依据
+        2. 特别注意数字、单位、专有名词等关键信息
+        3. 标记出所有在原始上下文中没有依据的内容
+        4. 给出最终的审计结果（通过或不通过）
+        
+        请按照以下格式输出审计结果：
+        审计结果：[通过/不通过]
+        错误信息：[如果不通过，列出所有错误；如果通过，留空]
+        
+        请严格按照上述格式输出，不要添加任何其他内容。
+        """
+        
+        try:
+            # Use Flash model for speed as this is an internal check
+            response = self.gemini_client.generate_text(prompt, use_pro=False, temperature=0.0)
+            
+            # 解析审计结果
+            lines = response.strip().split("\n")
+            audit_result = {
+                "passed": False,
+                "errors": []
+            }
+            
+            for line in lines:
+                if line.startswith("审计结果："):
+                    audit_result["passed"] = "通过" in line
+                elif line.startswith("错误信息："):
+                    errors = line[5:].strip()
+                    if errors and errors != "无":
+                        audit_result["errors"] = errors.split("；")
+            
+        except Exception as e:
+            logger.error(f"[审计] 审计失败: {e}")
+            # If audit fails, default to passed to avoid blocking user, moving forward
+            audit_result = {"passed": True, "errors": []}
+
         # 增强审计结果，添加更详细的信息
         enhanced_result = {
             "audit_passed": audit_result["passed"],

@@ -16,7 +16,7 @@ class GraphBuilder:
     
     def build_graph_from_blocks(self, document_blocks: List[Dict[str, Any]], file_name: str) -> Dict[str, Any]:
         """
-        从文档块构建知识图谱
+        从文档块构建知识图谱 (并行化)
         
         Args:
             document_blocks: 文档块列表
@@ -37,59 +37,95 @@ class GraphBuilder:
             "file_name": file_name
         }
         
-        # 遍历所有文档块
-        for idx, block in enumerate(document_blocks):
-            # 处理所有有内容的块，不再只限制text和table类型
-            if "verified_content" in block and block["verified_content"]:
-                logger.info(f"[图谱构建] 处理块 {idx+1}/{len(document_blocks)} - 类型: {block['type']}, 页码: {block['page']}, 分级: {block.get('tier', 'N/A')}")
-                logger.debug(f"[图谱构建] 块内容前100字符: {block['verified_content'][:100]}...")
-                
-                # 提取实体和关系
-                entities_relations = self.extract_entities_relations(block["verified_content"])
-                logger.info(f"[图谱构建] 块 {idx+1} 提取到 {len(entities_relations)} 个实体关系")
-                
-                # 创建块节点
-                import hashlib
-                block_content = block["verified_content"]
-                block_id = f"block_{hashlib.md5(block_content.encode('utf-8')).hexdigest()}"
-                self.graph_store.create_block(
-                    block_id=block_id,
-                    file_name=file_name,
-                    page=block.get("page", 1),
-                    content=block_content,
-                    block_type=block.get("type", "unknown")
-                )
-                
-                # 如果提取到了实体和关系，保存到图数据库
-                if entities_relations:
-                    logger.info(f"[图谱构建] 开始保存块 {idx+1} 的实体关系到图数据库")
-                    logger.debug(f"[图谱构建] 准备保存的实体关系列表: {entities_relations}")
-                    
-                    self.graph_store.batch_create_entities_and_relations(entities_relations)
-                    
-                    # 建立实体与块的关系
-                    for relation in entities_relations:
-                        self.graph_store.create_relation_entity_to_block(relation["source"], block_id)
-                        self.graph_store.create_relation_entity_to_block(relation["target"], block_id)
-                    
-                    unique_entities = len(set([er["source"] for er in entities_relations] + [er["target"] for er in entities_relations]))
-                    stats["entities_created"] += unique_entities
-                    stats["relations_created"] += len(entities_relations)
-                    
-                    logger.info(f"[图谱构建] 块 {idx+1} 已保存 - 新增实体: {unique_entities}, 新增关系: {len(entities_relations)}")
-                    logger.info(f"[图谱构建] 当前累计 - 实体: {stats['entities_created']}, 关系: {stats['relations_created']}")
-                else:
-                    logger.warning(f"[图谱构建] 块 {idx+1} 未提取到实体关系，跳过")
-                
-                stats["processed_blocks"] += 1
-            else:
-                logger.info(f"[图谱构建] 块 {idx+1} 类型为 {block['type']} 或无内容，跳过处理")
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import hashlib
+        
+        # 准备任务
+        tasks = []
+        # 仅处理有内容的块
+        valid_blocks = [(idx, block) for idx, block in enumerate(document_blocks) 
+                       if "verified_content" in block and block["verified_content"]]
+        
+        logger.info(f"[图谱构建] 需处理的有效块数: {len(valid_blocks)} (总块数: {len(document_blocks)})")
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # 提交任务
+            future_to_block = {
+                executor.submit(self._process_single_block, block, file_name, idx): idx 
+                for idx, block in valid_blocks
+            }
+            
+            # 处理结果
+            for future in as_completed(future_to_block):
+                idx = future_to_block[future]
+                try:
+                    result = future.result()
+                    if result["processed"]:
+                        stats["processed_blocks"] += 1
+                        stats["entities_created"] += result["entities_count"]
+                        stats["relations_created"] += result["relations_count"]
+                except Exception as exc:
+                    logger.error(f"[图谱构建] 块 {idx+1} 处理产生异常: {exc}")
         
         logger.info(f"[图谱构建] ========== 图谱构建完成 ==========")
-        logger.info(f"[图谱构建] 处理块数: {stats['processed_blocks']}/{stats['total_blocks']}, 创建实体数: {stats['entities_created']}, 创建关系数: {stats['relations_created']}")
-        logger.info(f"[图谱构建] 最终统计: {stats}")
+        logger.info(f"[图谱构建] 处理块数: {stats['processed_blocks']}/{len(valid_blocks)}, 创建实体数: {stats['entities_created']}, 创建关系数: {stats['relations_created']}")
         
         return stats
+
+    def _process_single_block(self, block: Dict[str, Any], file_name: str, idx: int) -> Dict[str, Any]:
+        """
+        处理单个文档块：提取实体关系并写入数据库
+        """
+        import hashlib
+        
+        result = {
+            "processed": False,
+            "entities_count": 0,
+            "relations_count": 0
+        }
+        
+        try:
+            logger.info(f"[图谱构建] [Thread] 处理块 {idx+1} - 类型: {block.get('type', 'N/A')}")
+            
+            # 提取实体和关系 (Gemini Call - I/O Bound)
+            entities_relations = self.extract_entities_relations(block["verified_content"])
+            
+            # 创建块节点 (DB Write)
+            block_content = block["verified_content"]
+            block_id = f"block_{hashlib.md5(block_content.encode('utf-8')).hexdigest()}"
+            
+            self.graph_store.create_block(
+                block_id=block_id,
+                file_name=file_name,
+                page=block.get("page", 1),
+                content=block_content,
+                block_type=block.get("type", "unknown")
+            )
+            
+            # 保存实体和关系 (DB Write)
+            if entities_relations:
+                self.graph_store.batch_create_entities_and_relations(entities_relations)
+                
+                # 建立实体与块的关系
+                for relation in entities_relations:
+                    self.graph_store.create_relation_entity_to_block(relation["source"], block_id)
+                    self.graph_store.create_relation_entity_to_block(relation["target"], block_id)
+                
+                unique_entities = len(set([er["source"] for er in entities_relations] + [er["target"] for er in entities_relations]))
+                
+                result["processed"] = True
+                result["entities_count"] = unique_entities
+                result["relations_count"] = len(entities_relations)
+                logger.info(f"[图谱构建] [Thread] 块 {idx+1} 完成 - 新增实体: {unique_entities}, 关系: {len(entities_relations)}")
+            else:
+                result["processed"] = True # 处理了，只是没结果
+                logger.warning(f"[图谱构建] [Thread] 块 {idx+1} 未提取到实体关系")
+                
+        except Exception as e:
+            logger.error(f"[图谱构建] [Thread] 块 {idx+1} 处理失败: {str(e)}")
+            raise e
+            
+        return result
     
     def extract_entities_relations(self, content: str) -> List[Dict[str, Any]]:
         """

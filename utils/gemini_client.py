@@ -31,8 +31,8 @@ class GeminiClient:
             api_key=os.getenv("GOOGLE_API_KEY")
         )
         
-        self.pro_model = "gemini-3-pro-preview"
-        self.flash_model = "gemini-3-pro-preview"
+        self.pro_model = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-pro")
+        self.flash_model = os.getenv("GEMINI_FLASH_MODEL_NAME", "gemini-1.5-flash")
         
         # 记录代理配置
         proxy_url = http_proxy or https_proxy
@@ -76,18 +76,26 @@ class GeminiClient:
         
         contents.append(image)
         
-        response = self.client.models.generate_content(
-            model=model,
-            contents=contents
-        )
-        return response.text
+        try:
+            response = self.client.models.generate_content(
+                model=model,
+                contents=contents
+            )
+            if hasattr(response, 'text') and response.text:
+                return response.text
+            else:
+                logging.warning(f"[GeminiClient] 多模态生成内容为空 or 被拦截。Response: {response}")
+                return ""
+        except Exception as e:
+            logging.error(f"[GeminiClient] 多模态生成失败: {e}")
+            return ""
     
     def generate_embedding(self, text: str) -> list:
         """
         生成文本嵌入
         """
         embedding = self.client.models.embed_content(
-            model="text-embedding-004",
+            model=os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"),
             contents=text,
             task_type="retrieval_document"
         )

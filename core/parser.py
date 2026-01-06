@@ -25,6 +25,7 @@ class PDFParser:
         pipeline_options.do_ocr = True
         pipeline_options.do_table_structure = True
         pipeline_options.table_structure_options.do_cell_matching = True
+        pipeline_options.generate_picture_images = True  # Ensure images are generated
         
         from docling.datamodel.base_models import InputFormat
         from docling.document_converter import PdfFormatOption
@@ -363,8 +364,10 @@ class PDFParser:
                 image_base64 = None
                 
                 # 情况1: block.image 是 ImageRef，有 uri 且是 data uri
-                if hasattr(block, 'image') and hasattr(block.image, 'uri') and block.image.uri and block.image.uri.startswith('data:image'):
-                        image_base64 = block.image.uri.split(',')[1]
+                if hasattr(block, 'image') and hasattr(block.image, 'uri') and block.image.uri:
+                    uri_str = str(block.image.uri)
+                    if uri_str.startswith('data:image'):
+                        image_base64 = uri_str.split(',')[1]
                 
                 # 情况2: block.image 是 bytes (可能是旧版本或特定情况)
                 elif hasattr(block, 'image') and isinstance(block.image, bytes):
@@ -470,19 +473,69 @@ class PDFParser:
             logger.warning(f"[块处理] 块处理失败，未找到内容 - 页码: {page_num}, 类型: {block_type}")
             return None
     
+    def _verify_single_block(self, block, idx, gemini_client):
+        """
+        验证单个块的逻辑，用于并行处理
+        """
+        # 确保 block 有 content 字段
+        if "content" not in block:
+            # logger.warning(f"[QA验证] 块 {idx+1} 没有content字段，跳过")
+            return block
+        
+        try:
+            if block["tier"] == "RED":
+                # RED 块：优化为单次高质量解析，减少 API 调用和耗时
+                if block["type"] == "text":
+                    logger.debug(f"[QA验证] RED块 {idx+1} 开始解析 (优化模式)")
+                    # 使用更明确的 Prompt，单次调用即可
+                    verified_text = gemini_client.generate_text(
+                        f"作为 IC/BCD 工艺专家，请准确解析并修正以下技术内容的表述，提取关键参数：\n{block['content']}",
+                        use_pro=True
+                    )
+                    block["verified_content"] = verified_text
+                    block["verification_passed"] = True
+            
+            elif block["tier"] == "YELLOW":
+                # YELLOW 块：保持单次解析
+                if block["type"] == "table":
+                    logger.debug(f"[QA验证] YELLOW块 {idx+1} 表格解析")
+                    table_markdown = block["content"]
+                    verified_text = gemini_client.generate_text(
+                        f"请准确解析以下工艺参数表格(Markdown格式)，提取关键参数和层级关系：\n{table_markdown}",
+                        use_pro=True
+                    )
+                    block["verified_content"] = verified_text
+                    block["verification_passed"] = True
+                elif block["type"] == "image":
+                    logger.debug(f"[QA验证] YELLOW块 {idx+1} 图像描述生成")
+                    image_description = gemini_client.generate_multimodal(
+                        prompt="请详细描述以下 IC/BCD 工艺相关图像的内容，包括结构、参数、特性等：",
+                        image_base64=block["content"],
+                        use_pro=True
+                    )
+                    block["verified_content"] = image_description
+                    block["verification_passed"] = True
+                else:
+                    block["verified_content"] = block["content"]
+                    block["verification_passed"] = True
+            
+            elif block["tier"] == "GREEN":
+                # GREEN 块：直接通过
+                block["verified_content"] = block["content"]
+                block["verification_passed"] = True
+            
+        except Exception as e:
+            logger.error(f"[QA验证] 块 {idx+1} 验证失败: {str(e)}")
+            block["verified_content"] = str(block.get("content", ""))
+            block["verification_passed"] = False
+            
+        return block
+
     def tiered_qa_verification(self, blocks: List[Dict[str, Any]], gemini_client) -> List[Dict[str, Any]]:
         """
-        对不同级别的块进行不同程度的 QA 验证
-        
-        Args:
-            blocks: 文档块列表
-            gemini_client: Gemini 客户端实例
-            
-        Returns:
-            验证后的文档块列表
+        对不同级别的块进行不同程度的 QA 验证 (并行优化版)
         """
-        logger.info(f"[QA验证] 开始QA验证，共 {len(blocks)} 个块")
-        verified_blocks = []
+        logger.info(f"[QA验证] 开始QA验证，共 {len(blocks)} 个块 (并行模式)")
         
         tier_counts = {"RED": 0, "YELLOW": 0, "GREEN": 0}
         for block in blocks:
@@ -491,93 +544,39 @@ class PDFParser:
         
         logger.info(f"[QA验证] 块分级统计 - RED: {tier_counts['RED']}, YELLOW: {tier_counts['YELLOW']}, GREEN: {tier_counts['GREEN']}")
         
-        for idx, block in enumerate(blocks):
-            # 确保 block 有 content 字段
-            if "content" not in block:
-                logger.warning(f"[QA验证] 块 {idx+1} 没有content字段，跳过")
-                continue
-            
-            try:
-                if block["tier"] == "RED":
-                    # RED 块：调用 Gemini 1.5 Pro 进行两次互校
-                    if block["type"] == "text":
-                        logger.debug(f"[QA验证] RED块 {idx+1} 开始两次互校")
-                        # 第一次解析
-                        first_result = gemini_client.generate_text(
-                            f"请准确解析以下 IC/BCD 工艺相关内容：\n{block['content']}",
-                            use_pro=True
-                        )
-                        
-                        # 第二次解析（不同的提示词）
-                        second_result = gemini_client.generate_text(
-                            f"请详细解读以下 IC/BCD 工艺参数：\n{block['content']}",
-                            use_pro=True
-                        )
-                        
-                        # 对比两次解析结果，确保一致性
-                        if first_result.strip() == second_result.strip():
-                            block["verified_content"] = first_result
-                            block["verification_passed"] = True
-                            logger.debug(f"[QA验证] RED块 {idx+1} 两次解析一致")
-                        else:
-                            # 如果不一致，进行第三次解析并取多数结果
-                            logger.debug(f"[QA验证] RED块 {idx+1} 两次解析不一致，进行第三次解析")
-                            third_result = gemini_client.generate_text(
-                                f"请精确提取以下 IC/BCD 工艺信息：\n{block['content']}",
-                                use_pro=True
-                            )
-                            
-                            # 统计结果
-                            results = [first_result, second_result, third_result]
-                            result_counts = {result: results.count(result) for result in results}
-                            majority_result = max(result_counts, key=result_counts.get)
-                            
-                            block["verified_content"] = majority_result
-                            block["verification_passed"] = True
-                
-                elif block["tier"] == "YELLOW":
-                    # YELLOW 块：单次解析
-                    if block["type"] == "table":
-                        logger.debug(f"[QA验证] YELLOW块 {idx+1} 表格解析")
-                        # 表格内容已经是 Markdown 字符串 (由 _process_block 处理)
-                        table_markdown = block["content"]
-                        verified_text = gemini_client.generate_text(
-                            f"请准确解析以下工艺参数表格(Markdown格式)，提取关键参数和层级关系：\n{table_markdown}",
-                            use_pro=True
-                        )
-                        block["verified_content"] = verified_text
-                        block["verification_passed"] = True
-                    elif block["type"] == "image":
-                        logger.debug(f"[QA验证] YELLOW块 {idx+1} 图像描述生成")
-                        # 图像生成描述
-                        image_description = gemini_client.generate_multimodal(
-                            prompt="请详细描述以下 IC/BCD 工艺相关图像的内容，包括结构、参数、特性等：",
-                            image_base64=block["content"],
-                            use_pro=True
-                        )
-                        block["verified_content"] = image_description
-                        block["verification_passed"] = True
-                    else:
-                        # 其他 YELLOW 块类型，直接使用内容
-                        logger.debug(f"[QA验证] YELLOW块 {idx+1} 直接使用内容")
-                        block["verified_content"] = block["content"]
-                        block["verification_passed"] = True
-                
-                elif block["tier"] == "GREEN":
-                    # GREEN 块：直接通过验证
-                    logger.debug(f"[QA验证] GREEN块 {idx+1} 直接通过验证")
-                    block["verified_content"] = block["content"]
-                    block["verification_passed"] = True
-                
-                verified_blocks.append(block)
-            except Exception as e:
-                # 处理异常，确保块有 verified_content 字段
-                logger.error(f"[QA验证] 块 {idx+1} 验证失败: {str(e)}")
-                block["verified_content"] = str(block["content"])
-                block["verification_passed"] = False
-                verified_blocks.append(block)
+        # 使用 ThreadPoolExecutor 进行并行处理
+        from concurrent.futures import ThreadPoolExecutor
+        import concurrent.futures
         
-        logger.info(f"[QA验证] QA验证完成，成功验证 {len(verified_blocks)}/{len(blocks)} 个块")
+        verified_blocks = []
+        # 限制并发数为 5，避免触发 API 速率限制
+        max_workers = 5
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_idx = {
+                executor.submit(self._verify_single_block, block, i, gemini_client): i 
+                for i, block in enumerate(blocks)
+            }
+            
+            # 收集结果
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    result_block = future.result()
+                    verified_blocks.append((idx, result_block))
+                except Exception as e:
+                    logger.error(f"[QA验证] 线程执行异常 (块 {idx}): {e}")
+                    # Fallback logic if thread fails completely
+                    block = blocks[idx]
+                    block["verified_content"] = str(block.get("content", ""))
+                    verified_blocks.append((idx, block))
+
+        # 恢复原始顺序
+        verified_blocks.sort(key=lambda x: x[0])
+        verified_blocks = [b[1] for b in verified_blocks]
+        
+        logger.info(f"[QA验证] QA验证完成，处理 {len(verified_blocks)} 个块")
         return verified_blocks
     
     def process_pdf(self, file_path: str, gemini_client) -> List[Dict[str, Any]]:

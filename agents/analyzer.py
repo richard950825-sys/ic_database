@@ -58,7 +58,7 @@ class DomainAnalyzer:
         [如果有信息缺口，列出；如果没有，写"无"]
         """
         
-        analysis_result = self.gemini_client.generate_text(analysis_prompt, use_pro=True)
+        analysis_result = self.gemini_client.generate_text(analysis_prompt, use_pro=False)
         
         # 解析分析结果
         lines = analysis_result.strip().split("\n")

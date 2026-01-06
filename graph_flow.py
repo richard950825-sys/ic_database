@@ -8,10 +8,11 @@ from core.graph_store import GraphStore
 import logging
 
 # 设置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# 设置日志
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# )
 logger = logging.getLogger("graph_flow")
 
 # 定义状态类型
@@ -61,101 +62,165 @@ def retrieval_node(state: AgentState) -> AgentState:
     # 获取查询和路由信息
     query = state["query"]
     route_type = state["route"]["route_type"]
-    logger.info(f"[检索节点] 开始检索 - 查询: '{query}', 路由类型: '{route_type}'")
+    keywords = state["route"].get("keywords", [])
+    
+    logger.info(f"[检索节点] 开始检索 - 查询: '{query}', 路由类型: '{route_type}', 关键词: {keywords}")
     
     # 获取检索策略
     retrieval_strategy = router.get_retrieval_strategy(route_type)
     logger.info(f"[检索节点] 检索策略: {retrieval_strategy}")
     
-    # 执行检索
+    # 定义并发检索函数
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    def run_exact_match():
+        if "exact_match" in retrieval_strategy["methods"]:
+            logger.info(f"[检索节点] 执行精确匹配检索")
+            return vector_store.exact_match_search(
+                query, 
+                limit=retrieval_strategy["exact_match_params"]["limit"]
+            )
+        return []
+
+    def run_vector_search():
+        if "vector_search" in retrieval_strategy["methods"]:
+            logger.info(f"[检索节点] 执行向量搜索")
+            return vector_store.search_similar(
+                query, 
+                limit=retrieval_strategy["vector_search_params"]["limit"]
+            )
+        return []
+
+    def run_graph_search():
+        if "graph_search" in retrieval_strategy["methods"]:
+            logger.info(f"[检索节点] 执行图谱搜索")
+            graph_results = []
+            
+            # 使用关键词进行图搜索，而不是获取整个图谱
+            # 如果没有提取到关键词，则不进行图搜索或使用查询分词
+            search_terms = keywords if keywords else [w for w in query.split() if len(w) > 1][:3]
+            
+            if not search_terms:
+                logger.warning("[检索节点] 未能提取关键词，跳过图谱搜索")
+                return []
+                
+            logger.info(f"[检索节点] 图谱搜索关键词: {search_terms}")
+            
+            # 搜索关系
+            all_relations = []
+            seen_relations = set()
+            
+            for term in search_terms:
+                relations = graph_store.search_relations(term)
+                for rel in relations:
+                    rel_key = f"{rel['source']}|{rel['relation']}|{rel['target']}"
+                    if rel_key not in seen_relations:
+                        all_relations.append(rel)
+                        seen_relations.add(rel_key)
+            
+            logger.info(f"[检索节点] 图谱搜索找到 {len(all_relations)} 个相关关系")
+            
+            if all_relations:
+                # 构建上下文文本
+                context_text = f"""
+                图数据库中与 '{", ".join(search_terms)}' 相关的关系信息：
+                
+                关系列表：
+                """
+                for relation in all_relations[:50]: # 限制数量防止上下文溢出
+                    context_text += f"- {relation['source']} {relation['relation']} {relation['target']}\n"
+                
+                retrieved_context = {
+                    "score": 1.0,  # 固定分数
+                    "metadata": {
+                        "file_name": "graph_database",
+                        "type": "graph_data",
+                        "page": 1,
+                        "tier": "RED",
+                        "coordinates": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},
+                        "content": context_text
+                    },
+                    "id": "graph_data_1"
+                }
+                graph_results.append(retrieved_context)
+            
+            return graph_results
+        return []
+
+    def run_table_search():
+        if "table_extraction" in retrieval_strategy["methods"]:
+            logger.info(f"[检索节点] 执行表格抽取搜索")
+            limit = retrieval_strategy.get("table_extraction_params", {}).get("limit", 3)
+            return vector_store.search_tables(query, limit=limit)
+        return []
+
+    def run_image_search():
+        if "image_retrieval" in retrieval_strategy["methods"]:
+            logger.info(f"[检索节点] 执行图像检索")
+            limit = retrieval_strategy.get("image_retrieval_params", {}).get("limit", 2)
+            return vector_store.search_images(query, limit=limit)
+        return []
+
+    # 并发执行检索
     retrieved_contexts = []
     
-    # 根据检索策略执行不同的检索方法
-    if "exact_match" in retrieval_strategy["methods"]:
-        # 精确匹配检索
-        logger.info(f"[检索节点] 执行精确匹配检索")
-        exact_match_results = vector_store.exact_match_search(
-            query, 
-            limit=retrieval_strategy["exact_match_params"]["limit"]
-        )
-        logger.info(f"[检索节点] 精确匹配检索到 {len(exact_match_results)} 个结果")
-        retrieved_contexts.extend(exact_match_results)
+    # 动态计算 worker 数量
+    num_methods = len(retrieval_strategy.get("methods", []))
+    max_workers = max(num_methods + 1, 3) # 至少3个
     
-    if "vector_search" in retrieval_strategy["methods"]:
-        # 向量搜索
-        logger.info(f"[检索节点] 执行向量搜索")
-        vector_results = vector_store.search_similar(
-            query, 
-            limit=retrieval_strategy["vector_search_params"]["limit"]
-        )
-        logger.info(f"[检索节点] 向量搜索到 {len(vector_results)} 个结果")
-        retrieved_contexts.extend(vector_results)
-    
-    if "graph_search" in retrieval_strategy["methods"]:
-        # 图谱搜索
-        logger.info(f"[检索节点] 执行图谱搜索")
-        graph_depth = retrieval_strategy["graph_search_params"]["depth"]
-        logger.info(f"[检索节点] 图谱搜索深度: {graph_depth}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_exact = executor.submit(run_exact_match)
+        future_vector = executor.submit(run_vector_search)
+        future_graph = executor.submit(run_graph_search)
+        future_table = executor.submit(run_table_search)
+        future_image = executor.submit(run_image_search)
         
-        # 2. 在图数据库中搜索相关实体和关系
-        all_entities = graph_store.get_all_entities()
-        all_relations = graph_store.get_all_relations()
-        logger.info(f"[检索节点] 从图数据库获取到 {len(all_entities)} 个实体，{len(all_relations)} 个关系")
-        logger.debug(f"[检索节点] 实体列表: {all_entities}")
-        logger.debug(f"[检索节点] 关系列表: {all_relations}")
-        
-        # 3. 将搜索结果转换为适合生成回答的上下文格式
-        # 构建上下文文本
-        context_text = f"""
-        图数据库中存储的实体和关系信息：
-        
-        实体列表：
-        {', '.join(all_entities)}
-        
-        关系列表：
-        """
-        
-        # 添加所有关系
-        for relation in all_relations:
-            context_text += f"- {relation['source']} {relation['relation']} {relation['target']}\n"
-        
-        # 4. 将结果添加到 retrieved_contexts
-        if all_entities or all_relations:
-            retrieved_context = {
-                "score": 1.0,  # 固定分数
-                "metadata": {
-                    "file_name": "graph_database",
-                    "type": "graph_data",
-                    "page": 1,
-                    "tier": "RED",  # 关系数据通常比较重要，标记为 RED
-                    "coordinates": {
-                        "x1": 0,
-                        "y1": 0,
-                        "x2": 0,
-                        "y2": 0
-                    },
-                    "content": context_text
-                },
-                "id": "graph_data_1"
-            }
-            retrieved_contexts.append(retrieved_context)
-            logger.info(f"[检索节点] 已将图谱数据添加到检索上下文")
-    
+        # 收集结果
+        try:
+            retrieved_contexts.extend(future_exact.result())
+        except Exception as e:
+            logger.error(f"[检索节点] 精确匹配检索失败: {e}")
+            
+        try:
+            retrieved_contexts.extend(future_vector.result())
+        except Exception as e:
+            logger.error(f"[检索节点] 向量搜索失败: {e}")
+            
+        try:
+            retrieved_contexts.extend(future_graph.result())
+        except Exception as e:
+            logger.error(f"[检索节点] 图谱搜索失败: {e}")
+
+        try:
+            table_results = future_table.result()
+            retrieved_contexts.extend(table_results)
+            if table_results:
+                logger.info(f"[检索节点] 表格搜索返回 {len(table_results)} 个结果")
+                for tr in table_results:
+                     logger.debug(f"[检索节点] 表格内容预览: {tr['metadata'].get('content', '')[:100]}...")
+        except Exception as e:
+            logger.error(f"[检索节点] 表格搜索失败: {e}")
+            
+        try:
+            retrieved_contexts.extend(future_image.result())
+        except Exception as e:
+            logger.error(f"[检索节点] 图像检索失败: {e}")
+
     # 去重，避免同一上下文被多次返回
     logger.info(f"[检索节点] 检索到 {len(retrieved_contexts)} 个原始结果，开始去重")
     seen_contents = set()
     unique_contexts = []
     for ctx in retrieved_contexts:
-        content_hash = hash(ctx["metadata"]["content"])
+        # 使用内容+文件名+页码作为去重键，防止不同位置的相同内容被误删
+        content_key = f"{ctx['metadata']['content']}_{ctx['metadata'].get('file_name', '')}_{ctx['metadata'].get('page', '')}"
+        content_hash = hash(content_key)
+        
         if content_hash not in seen_contents:
             seen_contents.add(content_hash)
             unique_contexts.append(ctx)
     
     logger.info(f"[检索节点] 去重后保留 {len(unique_contexts)} 个上下文")
-    for i, ctx in enumerate(unique_contexts):
-        logger.info(f"[检索节点] 上下文 {i+1} - 来源: {ctx['metadata']['file_name']}, 类型: {ctx['metadata']['type']}, 分数: {ctx.get('score', 'N/A')}")
-        logger.debug(f"[检索节点] 上下文 {i+1} 内容前100字符: {ctx['metadata']['content'][:100]}...")
-    
+
     # 更新状态
     state["retrieved_contexts"] = unique_contexts
     

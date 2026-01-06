@@ -113,63 +113,64 @@ class GraphStore:
                 relation=relation_type
             )
     
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     def batch_create_entities_and_relations(self, entities_relations: List[Dict[str, Any]]) -> None:
         """
-        批量创建实体和关系
+        批量创建实体和关系 (Optimized with UNWIND)
         
         Args:
             entities_relations: 实体和关系的列表
         """
-        logger.info(f"[图数据库] ========== 开始批量创建实体和关系，共 {len(entities_relations)} 个关系 ==========")
-        logger.debug(f"[图数据库] 接收到的实体关系列表: {entities_relations}")
+        logger.info(f"[图数据库] ========== 开始批量创建实体和关系 (Optimized)，共 {len(entities_relations)} 个关系 ==========")
         
-        created_count = 0
-        error_count = 0
+        # 过滤无效数据并去重，避免重复创建相同关系
+        valid_items = []
+        seen = set()
         
-        with self.driver.session() as session:
-            for idx, item in enumerate(entities_relations):
-                try:
-                    logger.info(f"[图数据库] 处理关系 {idx+1}/{len(entities_relations)} - 源: '{item['source']}', 关系: '{item['relation']}', 目标: '{item['target']}'")
-                    
-                    # 创建源实体
-                    logger.debug(f"[图数据库] 创建源实体: name='{item['source']}', type='Term'")
-                    session.run(
-                        "MERGE (s:Entity {name: $source_name, type: $source_type})",
-                        source_name=item["source"],
-                        source_type="Term"
-                    )
-                    
-                    # 创建目标实体
-                    logger.debug(f"[图数据库] 创建目标实体: name='{item['target']}', type='Term'")
-                    session.run(
-                        "MERGE (t:Entity {name: $target_name, type: $target_type})",
-                        target_name=item["target"],
-                        target_type="Term"
-                    )
-                    
-                    # 创建关系
-                    logger.debug(f"[图数据库] 创建关系: '{item['source']}' -[{item['relation']}]-> '{item['target']}'")
-                    session.run(
-                        """
-                        MATCH (s:Entity {name: $source})
-                        MATCH (t:Entity {name: $target})
-                        MERGE (s)-[r:RELATION {type: $relation}]->(t)
-                        """,
-                        source=item["source"],
-                        target=item["target"],
-                        relation=item["relation"]
-                    )
-                    
-                    logger.info(f"[图数据库] ✅ 关系 {idx+1} 创建成功 - 源: '{item['source']}', 关系: '{item['relation']}', 目标: '{item['target']}'")
-                    created_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"[图数据库] ❌ 关系 {idx+1} 创建失败 - 源: '{item.get('source', 'None')}', 关系: '{item.get('relation', 'None')}', 目标: '{item.get('target', 'None')}', 错误: {str(e)}")
-                    error_count += 1
+        for item in entities_relations:
+            if not (item.get("source") and item.get("target") and item.get("relation")):
+                continue
+                
+            # 创建唯一键用于去重
+            key = f"{item['source']}|{item['relation']}|{item['target']}"
+            if key not in seen:
+                seen.add(key)
+                valid_items.append({
+                    "source": item["source"],
+                    "target": item["target"],
+                    "relation": item["relation"]
+                })
         
-        logger.info(f"[图数据库] ========== 批量创建完成 ==========")
-        logger.info(f"[图数据库] 总关系数: {len(entities_relations)}, 创建成功: {created_count}, 创建失败: {error_count}")
-        logger.info(f"[图数据库] 成功率: {created_count/len(entities_relations)*100:.2f}%")
+        if not valid_items:
+            logger.warning("[图数据库] 没有有效的实体关系需要创建")
+            return
+
+        logger.info(f"[图数据库] 经过去重和过滤，将处理 {len(valid_items)} 条有效关系")
+
+        # 使用 UNWIND 语法进行批量插入
+        # 注意：这里我们假设所有实体类型都是 'Term'，如果需要动态类型，需要在 valid_items 中包含类型信息
+        query = """
+        UNWIND $batch AS row
+        MERGE (s:Entity {name: row.source})
+        ON CREATE SET s.type = 'Term'
+        MERGE (t:Entity {name: row.target})
+        ON CREATE SET t.type = 'Term'
+        MERGE (s)-[r:RELATION]->(t)
+        SET r.type = row.relation
+        """
+        
+        try:
+            with self.driver.session() as session:
+                session.run(query, batch=valid_items)
+            logger.info(f"[图数据库] ✅ 批量插入成功: {len(valid_items)} 条关系")
+        except Exception as e:
+            logger.error(f"[图数据库] ❌ 批量插入失败: {str(e)}")
+
     
     def search_relations(self, entity_name: str, relation_type: str = None) -> List[Dict[str, Any]]:
         """
@@ -404,3 +405,35 @@ class GraphStore:
             documents = [dict(record["d"]) for record in result]
             return documents
 
+    def delete_document(self, filename: str) -> None:
+        """
+        删除文档及其关联的所有块和关系
+        
+        Args:
+            filename: 文件名
+        """
+        logger.info(f"[图数据库] 开始删除文档: {filename}")
+        with self.driver.session() as session:
+            # 1. 删除 Document 节点
+            session.run(
+                "MATCH (d:Document {filename: $filename}) DETACH DELETE d",
+                filename=filename
+            )
+            
+            # 2. 删除该文档关联的 Block 节点 (以及它们的关系)
+            # 注意：Entities (Terms) 通常是跨文档共享的，所以默认不删除，除非是为了彻底清理
+            session.run(
+                "MATCH (b:Entity {file_name: $filename}) WHERE b.type = 'Block' DETACH DELETE b",
+                filename=filename
+            )
+            
+        logger.info(f"[图数据库] 文档删除完成: {filename}")
+
+    def clear_database(self):
+        """
+        清空整个图数据库
+        """
+        logger.warning("[图数据库] ⚠️ 正在清空整个数据库...")
+        with self.driver.session() as session:
+            session.run("MATCH (n) DETACH DELETE n")
+        logger.warning("[图数据库] 数据库已清空")

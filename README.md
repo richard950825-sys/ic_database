@@ -7,7 +7,7 @@
 - **Language:** Python 3.12
 - **Orchestration:** LangGraph
 - **LLM API:** Google Gemini 3 Pro Preview (用于复杂推理与审计)
-- **Local LLM:** Ollama (Llama-3.1-8B, 用于辅助检查)
+- **LLM API:** Google Gemini 2.5 Flash / Pro (全栈接管：推理、审计、路由、生成)
 - **PDF Parsing:** Docling v2 (IBM) - 支持 CUDA 加速
 - **Databases:** 
   - Qdrant (向量存储)
@@ -74,12 +74,7 @@ docker run -d -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j
 ```
 *注意：首次登录 http://localhost:7474 修改密码，并确保与 `.env` 中一致。*
 
-### 3. (可选) 启动 Ollama
-如果开启本地模型辅助功能：
-```bash
-ollama pull llama3.1
-ollama serve
-```
+
 
 ### 4. 启动应用
 ```bash

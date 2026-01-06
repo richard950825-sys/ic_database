@@ -1,7 +1,7 @@
 from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, CollectionDescription, VectorParams
+from qdrant_client.models import PointStruct, CollectionDescription, VectorParams, TextIndexParams, TokenizerType
 from typing import List, Dict, Any
-from sentence_transformers import SentenceTransformer
+from utils.gemini_client import GeminiClient
 import os
 from dotenv import load_dotenv
 import logging
@@ -13,22 +13,11 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 class VectorStore:
-    _instance = None
-    
-    def __new__(cls):
-        """
-        单例模式，确保每次初始化都返回同一个实例
-        """
-        if cls._instance is None:
-            cls._instance = super(VectorStore, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-    
     def __init__(self):
         """
         初始化向量存储
         """
-        if self._initialized:
+        if hasattr(self, "_initialized") and self._initialized:
             return
         
         # 连接到 Qdrant 服务
@@ -37,17 +26,17 @@ class VectorStore:
             api_key=os.getenv("QDRANT_API_KEY")
         )
         
-        # 初始化嵌入模型
-        self.embedding_model = SentenceTransformer(os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2"))
+        # 初始化 Gemini 客户端用于生成嵌入
+        self.gemini_client = GeminiClient()
         
         # 定义集合名称
-        self.collection_name = "ic_bcd_knowledge_base"
+        self.collection_name = os.getenv("QDRANT_COLLECTION_NAME", "ic_bcd_knowledge_base")
         
         # 检查集合是否存在，不存在则创建
         self._ensure_collection_exists()
         
         self._initialized = True
-        logger.info("[向量库] Qdrant 向量库初始化完成")
+        logger.info(f"[向量库] Qdrant 向量库初始化完成，集合: {self.collection_name} (Using Gemini Embeddings)")
     
     def _ensure_collection_exists(self):
         """
@@ -59,11 +48,40 @@ class VectorStore:
         
         # 如果集合不存在，则创建
         if self.collection_name not in collection_names:
+            logger.info(f"[向量库] 创建新集合: {self.collection_name}")
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
-                    size=self.embedding_model.get_sentence_embedding_dimension(),
+                    size=int(os.getenv("GEMINI_EMBEDDING_DIMENSION", 768)),  # Gemini text-embedding-004 dimension
                     distance="Cosine"
+                )
+            )
+        else:
+            # Check existing collection dimension
+            target_dim = int(os.getenv("GEMINI_EMBEDDING_DIMENSION", 768))
+            info = self.client.get_collection(self.collection_name)
+            if info.config.params.vectors.size != target_dim:
+                logger.warning(f"[向量库] 现有集合维度 ({info.config.params.vectors.size}) 与 Gemini ({target_dim}) 不匹配。重建集合...")
+                self.client.delete_collection(self.collection_name)
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=target_dim,
+                        distance="Cosine"
+                    )
+                )
+            
+            # 创建全文索引
+            logger.info("[向量库] 为 content 字段创建全文索引")
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="content",
+                field_schema=TextIndexParams(
+                    type="text",
+                    tokenizer=TokenizerType.WORD,
+                    min_token_len=2,
+                    max_token_len=15,
+                    lowercase=True
                 )
             )
     
@@ -77,7 +95,7 @@ class VectorStore:
         Returns:
             嵌入向量
         """
-        return self.embedding_model.encode(text).tolist()
+        return self.gemini_client.generate_embedding(text)
     
     def add_document_block(self, block: Dict[str, Any], file_name: str) -> str:
         """
@@ -219,6 +237,55 @@ class VectorStore:
             })
         
         return search_results
+
+    def search_tables(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """
+        专门搜索表格内容
+        
+        Args:
+            query: 查询文本
+            limit: 返回结果的数量
+        """
+        from qdrant_client import models
+        logger.info(f"[向量库] 执行表格专项搜索 - 查询: {query}")
+        
+        return self.search_similar(
+            query,
+            limit=limit,
+            filter_criteria=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="type",
+                        match=models.MatchValue(value="table")
+                    )
+                ]
+            )
+            )
+
+
+    def search_images(self, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """
+        专门搜索图像内容
+        
+        Args:
+            query: 查询文本
+            limit: 返回结果的数量
+        """
+        from qdrant_client import models
+        logger.info(f"[向量库] 执行图像专项搜索 - 查询: {query}")
+        
+        return self.search_similar(
+            query,
+            limit=limit,
+            filter_criteria=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="type",
+                        match=models.MatchValue(value="image")
+                    )
+                ]
+            )
+        )
     
     def delete_by_file_name(self, file_name: str):
         """
@@ -227,16 +294,19 @@ class VectorStore:
         Args:
             file_name: 文件名
         """
+        from qdrant_client import models
         self.client.delete(
             collection_name=self.collection_name,
-            points_selector={
-                "filter": {
-                    "key": "file_name",
-                    "match": {
-                        "value": file_name
-                    }
-                }
-            }
+            points_selector=models.FilterSelector(
+                filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="file_name",
+                            match=models.MatchValue(value=file_name)
+                        )
+                    ]
+                )
+            )
         )
     
     def get_collection_info(self):
@@ -267,3 +337,16 @@ class VectorStore:
             return {
                 "error": str(e)
             }
+
+    def clear_collection(self):
+        """
+        清空向量集合 (删除并重建)
+        """
+        logger.warning(f"[向量库] ⚠️ 正在清空集合: {self.collection_name}")
+        try:
+            self.client.delete_collection(self.collection_name)
+            # Re-create immediately
+            self._ensure_collection_exists()
+            logger.warning("[向量库] 集合已清空并重建")
+        except Exception as e:
+            logger.error(f"[向量库] 清空集合失败: {e}")

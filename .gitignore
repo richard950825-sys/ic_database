@@ -18,7 +18,6 @@ qdrant_data/
 # Scripts (Test, Debug, Verification)
 test_*.py
 reproduction_docling.py
-reset_db.py
 verify_*.py
 pdf_test.py
 debug_*.py
