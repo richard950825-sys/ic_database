@@ -109,22 +109,13 @@ class GeminiClient:
             logging.error(f"[GeminiClient] 多模态生成失败: {e}")
             return ""
     
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        reraise=True,
-        before_sleep=before_sleep_log(logging.getLogger(__name__), logging.WARNING)
-    )
     def generate_embedding(self, text: str) -> list:
         """
-        生成文本嵌入
+        [DEPRECATED] 生成文本嵌入
+        Now using Local BGE-M3 model in core/embedding.py
         """
-        embedding = self.client.models.embed_content(
-            model=os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004"),
-            contents=text,
-            config={'output_dimensionality': int(os.getenv("GEMINI_EMBEDDING_DIMENSION", 768))}
-        )
-        return embedding.embeddings[0].values
+        raise NotImplementedError("Gemini embedding is deprecated. Use LocalEmbedding instead.")
+
     
     def extract_entities(self, text: str) -> list:
         """

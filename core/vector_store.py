@@ -1,7 +1,7 @@
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, CollectionDescription, VectorParams, TextIndexParams, TokenizerType
 from typing import List, Dict, Any
-from utils.gemini_client import GeminiClient
+from core.embedding import LocalEmbedding
 import os
 from dotenv import load_dotenv
 import logging
@@ -26,8 +26,8 @@ class VectorStore:
             api_key=os.getenv("QDRANT_API_KEY")
         )
         
-        # 初始化 Gemini 客户端用于生成嵌入
-        self.gemini_client = GeminiClient()
+        # 初始化本地嵌入模型
+        self.embedding_model = LocalEmbedding()
         
         # 定义集合名称
         self.collection_name = os.getenv("QDRANT_COLLECTION_NAME", "ic_bcd_knowledge_base")
@@ -36,7 +36,7 @@ class VectorStore:
         self._ensure_collection_exists()
         
         self._initialized = True
-        logger.info(f"[向量库] Qdrant 向量库初始化完成，集合: {self.collection_name} (Using Gemini Embeddings)")
+        logger.info(f"[向量库] Qdrant 向量库初始化完成，集合: {self.collection_name} (Using Local BGE-M3)")
     
     def _ensure_collection_exists(self):
         """
@@ -52,13 +52,13 @@ class VectorStore:
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
-                    size=int(os.getenv("GEMINI_EMBEDDING_DIMENSION", 768)),  # Gemini text-embedding-004 dimension
+                    size=1024,  # BGE-M3 dimension
                     distance="Cosine"
                 )
             )
         else:
             # Check existing collection dimension
-            target_dim = int(os.getenv("GEMINI_EMBEDDING_DIMENSION", 768))
+            target_dim = 1024
             info = self.client.get_collection(self.collection_name)
             if info.config.params.vectors.size != target_dim:
                 logger.warning(f"[向量库] 现有集合维度 ({info.config.params.vectors.size}) 与 Gemini ({target_dim}) 不匹配。重建集合...")
@@ -95,7 +95,7 @@ class VectorStore:
         Returns:
             嵌入向量
         """
-        return self.gemini_client.generate_embedding(text)
+        return self.embedding_model.embed(text)
     
     def add_document_block(self, block: Dict[str, Any], file_name: str) -> str:
         """

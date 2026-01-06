@@ -10,3 +10,5 @@ python-dotenv==1.2.1
 qdrant-client==1.16.2
 streamlit==1.52.2
 tenacity==9.1.2
+sentence-transformers==3.0.0
+torch>=2.0.0  # Assumes CUDA capable system or CPU fallback

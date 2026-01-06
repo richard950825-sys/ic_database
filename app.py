@@ -25,8 +25,11 @@ def get_file_hash(file_bytes):
 
 # ... (Logging setup remains)
 # Configure logging with explicit UTF-8 encoding
-logging.basicConfig(level=logging.INFO, handlers=[])  # Clear existing handlers
+# Configure logging with explicit UTF-8 encoding
+# Reset handlers to avoid duplication on Streamlit rerun
 root_logger = logging.getLogger()
+if root_logger.hasHandlers():
+    root_logger.handlers.clear()
 root_logger.setLevel(logging.INFO)
 
 # File Handler with UTF-8
@@ -34,30 +37,32 @@ file_handler = logging.FileHandler('app_monitor.log', encoding='utf-8')
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 root_logger.addHandler(file_handler)
 
-# Stream Handler with UTF-8 (only if not already handled by Streamlit, but explicit is safer)
-# We wrap stdout in a TextIOWrapper ensuring utf-8 if we want to be 100% sure,
-# or simply trust sys.stdout.reconfigure() we added in gemini_client.
-# But for StreamHandler, we can assume sys.stdout is safe now, OR we explicit set stream.
+# Stream Handler with UTF-8
 stream_handler = logging.StreamHandler(sys.stdout)
 stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 root_logger.addHandler(stream_handler)
 logger = logging.getLogger(__name__)
+
+# Suppress noisy library logs
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 # 设置页面标题和布局
 st.set_page_config(
     page_title="IC/BCD 多模态知识库系统",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # Custom CSS for Gemini-like UI
 st.markdown("""
 <style>
-    /* Global Settings */
+    /* Global Settings - Light Theme */
     [data-testid="stAppViewContainer"] {
-        background-color: #0e1117;
-        color: #e0e0e0;
+        background-color: #ffffff;
+        color: #31333f;
     }
     
     /* Hide Header/Footer */
@@ -66,42 +71,82 @@ st.markdown("""
     
     /* Chat Container Styling */
     .stChatMessage {
-        background-color: #1e1e1e;
-        border-radius: 10px;
-        padding: 10px;
-        margin-bottom: 10px;
-        border: 1px solid #333;
+        background-color: transparent;
+        border: none;
+        box-shadow: none;
+    }
+
+    /* User Message Specifics - Right Aligned */
+    [data-testid="stChatMessage"]:nth-child(odd) {
+        flex-direction: row-reverse;
+        text-align: right;
     }
     
-    /* Input Box Styling - Fix to bottom and remove padding issues */
+    /* Target the content container inside the chat message for background */
+    [data-testid="stChatMessage"]:nth-child(odd) > div:first-child {
+        background-color: #95ec69; /* WeChat Green for User */
+        color: black;
+        border-radius: 10px;
+        padding: 10px;
+        margin-right: 10px;
+        margin-left: auto; /* Push to right */
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    }
+
+    /* Assistant Message - Left Aligned */
+    [data-testid="stChatMessage"]:nth-child(even) {
+        flex-direction: row;
+        text-align: left;
+    }
+
+    [data-testid="stChatMessage"]:nth-child(even) > div:first-child {
+        background-color: #ffffff;
+        color: black;
+        border-radius: 10px;
+        padding: 10px;
+        margin-left: 10px;
+        margin-right: auto;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        border: 1px solid #e0e0e0;
+    }
+    
+    /* Input Box Styling */
     .stChatInput {
-        position: fixed;
-        bottom: 0px;
-        z-index: 1000;
-        background-color: #0e1117;
+        background-color: #f5f5f5;
         padding-bottom: 20px;
+        border-top: 1px solid #ddd;
     }
     
     /* Enhance sidebar */
     [data-testid="stSidebar"] {
-        background-color: #161b22;
-        border-right: 1px solid #333;
+        background-color: #f8f9fa;
+        border-right: 1px solid #e0e0e0;
     }
     
+    /* Buttons */
+    .stButton button {
+        border-radius: 6px;
+        transition: all 0.2s;
+    }
+    .stButton button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+
     /* Scrollbar */
     ::-webkit-scrollbar {
         width: 8px;
         height: 8px;
     }
     ::-webkit-scrollbar-track {
-        background: #0e1117; 
+        background: #f1f1f1; 
     }
     ::-webkit-scrollbar-thumb {
-        background: #333; 
+        background: #ccc; 
         border-radius: 4px;
     }
     ::-webkit-scrollbar-thumb:hover {
-        background: #555; 
+        background: #bbb; 
     }
 </style>
 """, unsafe_allow_html=True)
@@ -127,11 +172,16 @@ def get_graph_builder():
 def get_gemini_client():
     return GeminiClient()
 
-parser = get_parser()
-vector_store = get_vector_store()
-graph_store = get_graph_store()
-graph_builder = get_graph_builder()
-gemini_client = get_gemini_client()
+# 使用 Spinner 提示加载进度
+with st.spinner("正在初始化系统组件，首次加载大型模型可能需要较长时间..."):
+    parser = get_parser()
+    
+    # VectorStore 初始化包含 BGE-M3 模型加载 (约 2GB)，最耗时
+    vector_store = get_vector_store()
+    
+    graph_store = get_graph_store()
+    graph_builder = get_graph_builder()
+    gemini_client = get_gemini_client()
 
 # 创建临时目录用于存储上传的文件
 if "temp_dir" not in st.session_state:
@@ -225,21 +275,21 @@ with tab_qa:
 
     # 右侧：PDF 预览
     with col2:
-        st.title("📖 PDF 预览")
-        if st.session_state.uploaded_files:
-            selected_file = st.selectbox(
-                "选择要预览的文件",
-                [file.name for file in st.session_state.uploaded_files]
-            )
-            if selected_file:
-                # Find the file object
-                file_obj = next((f for f in st.session_state.uploaded_files if f.name == selected_file), None)
-                if file_obj:
-                    base64_pdf = base64.b64encode(file_obj.getvalue()).decode("utf-8")
-                    pdf_display = f"<iframe src='data:application/pdf;base64,{base64_pdf}' width='100%' height='600' type='application/pdf'></iframe>"
-                    st.markdown(pdf_display, unsafe_allow_html=True)
-        else:
-            st.info("预览仅对当前上传的文件有效")
+        with st.expander("📖 PDF 预览", expanded=False):
+            if st.session_state.uploaded_files:
+                selected_file = st.selectbox(
+                    "选择要预览的文件",
+                    [file.name for file in st.session_state.uploaded_files]
+                )
+                if selected_file:
+                    # Find the file object
+                    file_obj = next((f for f in st.session_state.uploaded_files if f.name == selected_file), None)
+                    if file_obj:
+                        base64_pdf = base64.b64encode(file_obj.getvalue()).decode("utf-8")
+                        pdf_display = f"<iframe src='data:application/pdf;base64,{base64_pdf}' width='100%' height='600' type='application/pdf'></iframe>"
+                        st.markdown(pdf_display, unsafe_allow_html=True)
+            else:
+                st.info("预览仅对当前上传的文件有效")
 
 # Helper function to process a single file
 def process_file(file_path, file_name, file_bytes):
@@ -391,54 +441,45 @@ with st.sidebar:
         st.subheader("已上传的文件")
         for file in st.session_state.uploaded_files:
             st.write(f"✅ {file.name}")
-    
-    col_proc_1, col_proc_2 = st.columns(2)
-    with col_proc_1:
-        start_processing = st.button("处理文件", key="process_button", disabled=not st.session_state.uploaded_files)
-    with col_proc_2:
-        stop_processing = st.button("中止处理", key="stop_button", type="primary")
-
-    if stop_processing:
-        st.warning("用户请求中止处理。")
-        st.stop()
-
-    if start_processing:
-        with st.spinner("正在批量处理文件... (点击'中止处理'可停止)"):
-            logger.info(f"[处理流程] ========== 开始 ... ==========")
-            
-            processed_any = False
-            
-            status_container = st.status("正在处理文件...", expanded=True)
-            
-            for file in st.session_state.uploaded_files:
-                file_bytes = file.getvalue()
-                file_hash = get_file_hash(file_bytes)
+        
+        # 只显示处理按钮，移除容易引起混淆的中止按钮（建议使用右上角原生Stop）
+        if st.button("开始处理文件", key="process_button", type="primary", use_container_width=True):
+            with st.spinner("正在批量处理文件..."):
+                logger.info(f"[处理流程] ========== 开始 ... ==========")
                 
-                # Check Deduplication
-                existing_doc = graph_store.get_document(file_hash)
-                if existing_doc:
-                    st.toast(f"📄 {file.name} 已存在，跳过")
-                    status_container.write(f"Existing: {file.name}")
-                    logger.info(f"[处理流程] 文件跳过 (已存在): {file.name}")
-                    continue
+                processed_any = False
                 
-                # Process New File
-                processed_any = True
-                status_container.write(f"Processing: {file.name}")
-                file_path = os.path.join(st.session_state.temp_dir, file.name)
+                status_container = st.status("正在处理文件...", expanded=True)
                 
-                # Ensure file exists (it should, but just in case)
-                if not os.path.exists(file_path):
-                     with open(file_path, "wb") as f:
-                        f.write(file_bytes)
+                for file in st.session_state.uploaded_files:
+                    file_bytes = file.getvalue()
+                    file_hash = get_file_hash(file_bytes)
+                    
+                    # Check Deduplication
+                    existing_doc = graph_store.get_document(file_hash)
+                    if existing_doc:
+                        st.toast(f"📄 {file.name} 已存在，跳过")
+                        status_container.write(f"Existing: {file.name}")
+                        logger.info(f"[处理流程] 文件跳过 (已存在): {file.name}")
+                        continue
+                    
+                    # Process New File
+                    processed_any = True
+                    status_container.write(f"Processing: {file.name}")
+                    file_path = os.path.join(st.session_state.temp_dir, file.name)
+                    
+                    # Ensure file exists (it should, but just in case)
+                    if not os.path.exists(file_path):
+                         with open(file_path, "wb") as f:
+                            f.write(file_bytes)
+                    
+                    process_file(file_path, file.name, file_bytes)
                 
-                process_file(file_path, file.name, file_bytes)
-            
-            st.session_state.processing_complete = True
-            status_container.update(label="批量处理完成!", state="complete", expanded=False)
-            st.success("批量处理结束！")
-            if processed_any:
-                st.rerun()
+                st.session_state.processing_complete = True
+                status_container.update(label="批量处理完成!", state="complete", expanded=False)
+                st.success("批量处理结束！")
+                if processed_any:
+                    st.rerun()
 
 
 # 页脚
