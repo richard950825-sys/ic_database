@@ -12,7 +12,10 @@ class GraphBuilder:
         """
         self.gemini_client = GeminiClient()
         self.graph_store = GraphStore()
-        logger.info("[图谱构建器] 初始化完成")
+        # Load Prompts
+        from core.config import settings
+        self.prompts = settings.ENTITY_EXTRACTION_PROMPTS
+        logger.info("[图谱构建器] 初始化完成 (已加载自适应Prompt)")
     
     
     def build_graph_from_blocks(self, document_blocks: List[Dict[str, Any]], file_name: str, progress_callback=None) -> Dict[str, Any]:
@@ -98,7 +101,8 @@ class GraphBuilder:
             logger.info(f"[图谱构建] [Thread] 处理块 {idx+1} - 类型: {block.get('type', 'N/A')}")
             
             # 提取实体和关系 (Gemini Call - I/O Bound)
-            entities_relations = self.extract_entities_relations(block["verified_content"])
+            tier = block.get("tier", "GREEN")
+            entities_relations = self.extract_entities_relations(block["verified_content"], tier)
             
             # 创建块节点 (DB Write)
             block_content = block["verified_content"]
@@ -137,21 +141,24 @@ class GraphBuilder:
             
         return result
     
-    def extract_entities_relations(self, content: str) -> List[Dict[str, Any]]:
+    def extract_entities_relations(self, content: str, tier: str = "GREEN") -> List[Dict[str, Any]]:
         """
-        从文本内容中提取实体和关系
+        从文本内容中提取实体和关系 (Adaptive)
         
         Args:
             content: 文本内容
+            tier: 块级别 (RED/YELLOW/GREEN)
             
         Returns:
             实体和关系的列表
         """
-        logger.info(f"[实体提取] 开始提取实体和关系，内容长度: {len(content)} 字符")
-        logger.debug(f"[实体提取] 完整输入内容: {content}")
+        logger.info(f"[实体提取] 开始提取实体 ({tier} Mode)，内容长度: {len(content)}")
+        
+        # Select Prompt based on Tier
+        prompt_template = self.prompts.get(tier, self.prompts["GREEN"])
         
         # 使用 Gemini 提取实体和关系
-        entities_relations = self.gemini_client.extract_entities(content)
+        entities_relations = self.gemini_client.extract_entities(content, prompt_template)
         logger.info(f"[实体提取] Gemini 提取到 {len(entities_relations)} 个原始实体关系")
         
         # 过滤无效的实体和关系

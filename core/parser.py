@@ -30,8 +30,11 @@ class PDFParser:
         pipeline_options.table_structure_options.do_cell_matching = True
         pipeline_options.generate_picture_images = True  # Ensure images are generated
         
-        from docling.datamodel.base_models import InputFormat
         from docling.document_converter import PdfFormatOption
+        from docling.datamodel.base_models import InputFormat
+        from core.chunk_merger import ChunkMerger
+        from core.embedding import LocalEmbedding
+        from core.config import settings
         
         self.converter = DocumentConverter(
             format_options={
@@ -39,11 +42,18 @@ class PDFParser:
             }
         )
         
-        # 定义分级标签的关键词
-        self.tier_keywords = {
-            "RED": ["Breakdown Voltage", "DRC", "LDMOS", "M3", "MIM", "CMOS", "BCD", "工艺参数", "设计规则", "击穿电压", "漏电流"],
-            "YELLOW": ["Table", "图", "示意图", "流程图", "参数表", "特性曲线"],
-            "GREEN": ["摘要", "引言", "背景", "参考文献", "致谢"]
+        # Initialize Chunk Merger
+        self.chunk_merger = ChunkMerger()
+        
+        # Initialize Embedding Model for Semantic Classification
+        self.embedding_model = LocalEmbedding()
+        self.semantic_prototypes = settings.SEMANTIC_PROTOTYPES
+        self.tier_keywords = settings.TIER_KEYWORDS
+        
+        # Cache prototype embeddings
+        logger.info("[PDFParser] Caching prototype embeddings...")
+        self.proto_embeddings = {
+            k: self.embedding_model.embed(v) for k, v in self.semantic_prototypes.items()
         }
     
     def parse_pdf(self, file_path: str) -> Document:
@@ -62,25 +72,65 @@ class PDFParser:
         logger.info(f"[PDF解析] 文件解析成功，文档类型: {type(document)}")
         return document
     
-    def classify_block(self, block_content: str) -> str:
+    def classify_block(self, block_content: str, heuristic_tier: str = None) -> str:
         """
-        对文档块进行分级标签
+        对文档块进行分级标签 (Hybrid: Rules + Semantics)
         
         Args:
             block_content: 文档块内容
+            heuristic_tier: 启发式预判级别 (e.g. from ChunkMerger)
             
         Returns:
             分级标签：RED、YELLOW 或 GREEN
         """
-        # 优先检查 RED 关键词
+        # 1. 优先尊重启发式判断 (如 ChunkMerger 判定为潜在表格)
+        if heuristic_tier and heuristic_tier != "GREEN":
+            # 只有当启发式判定非常确定时才直接返回？
+            # 或者仅作为参考？这里我们假设启发式主要用于 "POTENTIAL_TABLE" -> YELLOW
+            if heuristic_tier == "YELLOW": 
+                return "YELLOW"
+        
+        # 2. 规则匹配 (Fast Path)
         for keyword in self.tier_keywords["RED"]:
             if keyword in block_content:
                 return "RED"
         
-        # 然后检查 YELLOW 关键词
         for keyword in self.tier_keywords["YELLOW"]:
             if keyword in block_content:
                 return "YELLOW"
+                
+        # 3. 语义匹配 (Slow Path, using Embeddings)
+        # 计算与 RED/YELLOW原型的相似度
+        try:
+            import numpy as np
+            
+            def cosine_sim(a, b):
+                return np.dot(a, b.T) / (np.linalg.norm(a) * np.linalg.norm(b))
+            
+            curr_embed = self.embedding_model.embed(block_content)
+            if not curr_embed: return "GREEN"
+            
+            # Reshape is not strictly needed if we use simple dot product on 1D arrays
+            # But embed returns list, so convert to array
+            curr_vec = np.array(curr_embed)
+            
+            # Check RED
+            red_proto = np.array(self.proto_embeddings["RED"])
+            red_sim = cosine_sim(curr_vec, red_proto)
+            
+            # Check YELLOW
+            yellow_proto = np.array(self.proto_embeddings["YELLOW"])
+            yellow_sim = cosine_sim(curr_vec, yellow_proto)
+            
+            # logger.debug(f"[分类] 语义相似度 - RED: {red_sim:.3f}, YELLOW: {yellow_sim:.3f} | Content: {block_content[:30]}...")
+            
+            if red_sim > 0.6: # Threshold can be tuned
+                return "RED"
+            if yellow_sim > 0.6:
+                return "YELLOW"
+                
+        except Exception as e:
+            logger.warning(f"[分类] 语义匹配失败: {e}")
         
         # 默认标记为 GREEN
         return "GREEN"
@@ -266,8 +316,7 @@ class PDFParser:
                         if processed_block:
                             blocks.append(processed_block)
         
-        # 4. 尝试处理content属性
-        elif hasattr(document, 'content'):
+        if hasattr(document, 'content'):
             # 尝试处理content属性
             logger.info(f"[块提取] 检测到content属性")
             logger.debug(f"[块提取] content 属性类型: {type(document.content)}")
@@ -284,8 +333,27 @@ class PDFParser:
         else:
             logger.warning(f"[块提取] 未检测到blocks或pages属性，文档结构可能不支持")
         
-        logger.info(f"[块提取] 块提取完成，共提取 {len(blocks)} 个块")
-        return blocks
+        logger.info(f"[块提取] 原始块提取完成，共 {len(blocks)} 个块。开始合并...")
+        
+        # --- Apply Smart Chunk Merging ---
+        merged_blocks = self.chunk_merger.merge_blocks(blocks)
+        logger.info(f"[块提取] 块合并完成，剩余 {len(merged_blocks)} 个块")
+        
+        # --- Re-classify Merged Blocks ---
+        # ChunkMerger might have set 'tier' to 'YELLOW' (heuristic), or 'GREEN'.
+        # We need to run the full classification logic on the MERGED content.
+        final_blocks = []
+        for block in merged_blocks:
+            # If usage 'type' is 'potential_table', we might want to keep it or refine it
+            heuristic_tier = block.get("tier", "GREEN")
+            content = block.get("content", "")
+            
+            # Re-run classifier with semantic check
+            final_tier = self.classify_block(content, heuristic_tier)
+            block["tier"] = final_tier
+            final_blocks.append(block)
+            
+        return final_blocks
     
     def _process_block(self, block, page_num, document):
         """
@@ -431,10 +499,15 @@ class PDFParser:
                             block_data["type"] = "text"
                         
                         content_found = True
-                        logger.debug(f"[块处理] 使用{method_name}属性获取内容成功 - 页码: {page_num}, 内容长度: {len(content)}")
+                        # logger.debug(f"[块处理] 使用{method_name}属性获取内容成功 - 页码: {page_num}, 内容长度: {len(content)}")
                         break
                 except Exception as e:
                     logger.debug(f"[块处理] 使用{method_name}属性获取内容失败: {str(e)}")
+        
+        # 不要在这里立即调用 classify_block，我们会在 Chunk合并 后统一进行分类
+        # 除非是为了 type guessing
+        if content_found and block_data["tier"] is None:
+             block_data["tier"] = "GREEN" # 临时默认，稍后重算
         
         # 如果还是没有找到内容，再根据块类型尝试特殊处理 (Fallback for Text)
         if not content_found:
@@ -568,57 +641,128 @@ class PDFParser:
 
     def tiered_qa_verification(self, blocks: List[Dict[str, Any]], gemini_client, progress_callback=None) -> List[Dict[str, Any]]:
         """
-        对不同级别的块进行不同程度的 QA 验证 (并行优化版)
+        对不同级别的块进行不同程度的 QA 验证 (Batch Optimization)
         """
         total_blocks = len(blocks)
-        logger.info(f"[QA验证] 开始QA验证，共 {total_blocks} 个块 (并行模式)")
+        logger.info(f"[QA验证] 开始QA验证，共 {total_blocks} 个块 (Batch模式)")
         
-        tier_counts = {"RED": 0, "YELLOW": 0, "GREEN": 0}
-        for block in blocks:
+        # 分组
+        red_blocks_indices = []
+        yellow_blocks_with_indices = []
+        green_blocks_indices = []
+        
+        for i, block in enumerate(blocks):
             tier = block.get("tier", "GREEN")
-            tier_counts[tier] = tier_counts.get(tier, 0) + 1
+            b_type = block.get("type", "text")
+            
+            if tier == "RED" and b_type == "text":
+                red_blocks_indices.append(i)
+            elif tier == "YELLOW" or (tier == "RED" and b_type != "text"):
+                # YELLOW 和 非文本RED (如table/image) 仍保持单次处理或特殊处理
+                # 这里我们假设所有 RED table/image 也走 YELLOW path (visual understanding)
+                yellow_blocks_with_indices.append((i, block))
+            else:
+                green_blocks_indices.append(i)
         
-        logger.info(f"[QA验证] 块分级统计 - RED: {tier_counts['RED']}, YELLOW: {tier_counts['YELLOW']}, GREEN: {tier_counts['GREEN']}")
-        
-        # 使用 ThreadPoolExecutor 进行并行处理
+        logger.info(f"[QA验证] 统计: RED_TEXT={len(red_blocks_indices)}, SPECIAL/YELLOW={len(yellow_blocks_with_indices)}, GREEN={len(green_blocks_indices)}")
+
+        verified_blocks_map = {} # idx -> block
+
+        # --- 1. Batch Process RED Text Blocks ---
+        if red_blocks_indices:
+            batch_size = 5
+            for k in range(0, len(red_blocks_indices), batch_size):
+                batch_indices = red_blocks_indices[k : k + batch_size]
+                batch_content = []
+                for idx in batch_indices:
+                    # Strip newlines to make it cleaner in prompt
+                    content_clean = blocks[idx].get("content", "").replace("\n", " ")
+                    batch_content.append(f"Block_{idx}: {content_clean}")
+                
+                prompt_text = "\n\n".join(batch_content)
+                full_prompt = (
+                    f"作为 IC/BCD 工艺专家，请批量解析以下技术内容块。提取关键参数。\n"
+                    f"请严格按照JSON格式返回，Key为Block_ID (e.g. 'Block_12')，Value为解析后的修正文本。\n"
+                    f"\n{prompt_text}"
+                )
+                
+                try:
+                    logger.info(f"[QA验证] 发送Batch请求 (Size: {len(batch_indices)})")
+                    response_text = gemini_client.generate_text(full_prompt, use_pro=True)
+                    
+                    # 简单解析 JSON-like response (Gemini sometimes returns markdown json)
+                    import json
+                    # Try to find JSON structure
+                    json_str = response_text
+                    if "```json" in response_text:
+                        json_str = response_text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in response_text:
+                        json_str = response_text.split("```")[1].split("```")[0].strip()
+                    
+                    try:
+                        parsed_batch = json.loads(json_str)
+                    except:
+                        logger.warning(f"[QA验证] Batch JSON解析失败，尝试Fallback")
+                        parsed_batch = {}
+
+                    # Fill results
+                    for idx in batch_indices:
+                        block = blocks[idx]
+                        key = f"Block_{idx}"
+                        if key in parsed_batch:
+                            block["verified_content"] = str(parsed_batch[key])
+                            block["verification_passed"] = True
+                        else:
+                            # Fallback if key missing
+                            block["verified_content"] = block["content"]
+                            block["verification_passed"] = True
+                        verified_blocks_map[idx] = block
+
+                except Exception as e:
+                    logger.error(f"[QA验证] Batch处理异常: {e}")
+                    # Fallback for entire batch
+                    for idx in batch_indices:
+                        block = blocks[idx]
+                        block["verified_content"] = block["content"]
+                        block["verification_passed"] = False
+                        verified_blocks_map[idx] = block
+
+                if progress_callback:
+                    progress_callback(k + len(batch_indices), total_blocks, f"Batch验证 RED Blocks...")
+
+        # --- 2. Parallel Process YELLOW/Special Blocks ---
+        # Reuse existing threading logic for Images/Tables
         from concurrent.futures import ThreadPoolExecutor
         import concurrent.futures
         
-        verified_blocks = []
-        # 限制并发数
-        max_workers = 5
-        
-        processed_count = 0
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有任务
+        with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_idx = {
-                executor.submit(self._verify_single_block, block, i, gemini_client): i 
-                for i, block in enumerate(blocks)
+                executor.submit(self._verify_single_block, block, idx, gemini_client): idx 
+                for idx, block in yellow_blocks_with_indices
             }
             
-            # 收集结果
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
-                processed_count += 1
                 try:
                     result_block = future.result()
-                    verified_blocks.append((idx, result_block))
+                    verified_blocks_map[idx] = result_block
                 except Exception as e:
-                    logger.error(f"[QA验证] 线程执行异常 (块 {idx}): {e}")
-                    # Fallback
+                    logger.error(f"[QA验证] Special Block {idx} 失败: {e}")
                     block = blocks[idx]
                     block["verified_content"] = str(block.get("content", ""))
-                    verified_blocks.append((idx, block))
+                    verified_blocks_map[idx] = block
                 
-                # Update progress
                 if progress_callback:
-                    progress_callback(processed_count, total_blocks, f"验证块 {idx+1}")
+                    progress_callback(len(red_blocks_indices) + len(verified_blocks_map), total_blocks, f"验证表格/图片 {idx}...")
 
-        # 恢复原始顺序
-        verified_blocks.sort(key=lambda x: x[0])
-        verified_blocks = [b[1] for b in verified_blocks]
-        
-        logger.info(f"[QA验证] QA验证完成，处理 {len(verified_blocks)} 个块")
+        # --- 3. Process GREEN Blocks ---
+        for idx in green_blocks_indices:
+            block = blocks[idx]
+            block["verified_content"] = block["content"]
+            block["verification_passed"] = True
+            verified_blocks_map[idx] = block
+
+        # Reassemble
+        verified_blocks = [verified_blocks_map[i] for i in range(total_blocks)]
         return verified_blocks
 

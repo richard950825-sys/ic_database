@@ -23,5 +23,10 @@ pdf_test.py
 
 inspect_qdrant.py
 .gitignore
+*.log 
+temp_uploads/
+
+server.log
+
 
 

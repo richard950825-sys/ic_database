@@ -14,3 +14,5 @@ torch
 docling
 tenacity
 httpx
+pypdf
+numpy

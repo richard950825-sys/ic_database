@@ -5,28 +5,32 @@
 ## 🌟 核心功能
 
 ### 1. 混合解析策略 (Hybrid Parsing Strategy)
--   **原生 PDF 加速**: 使用 `docling` 直接解析 PDF 结构提取文本和表格（速度：毫秒级）。
--   **视觉理解兜底**: 自动检测扫描版表格或复杂图片，路由至 **多模态大模型 (Gemini)** 进行语义重构（精度：高）。
--   **灵活配置**: 可在 `core/config.py` 中切换 `USE_OCR` 开关，在“极速模式（混合）”和“全面 OCR 模式”间切换。
+-   **智能分块**: 使用 `Smart Chunking` 和 `Chunk Merger` 算法，自动将破碎的文本行合并为语义段落，并识别潜在表格区域。
+-   **混合分级**: 结合关键词规则 (Level 1) 和各类原型向量语义相似度 (Level 2) 进行内容分级。
+    -   **RED**: 关键工艺参数，使用 **Gemini 2.0 Pro** 精准提取。
+    -   **YELLOW**: 表格与技术指标，使用 **Adaptive Entity Extraction** 提取结构化数据。
+    -   **GREEN**: 通用文本，快速入库。
+-   **灵活配置**: 可在 `core/config.py` 中切换 `USE_OCR` 开关。
 
-### 2. 图谱增强检索 (Process GraphRAG)
--   **知识图谱**: 利用 Neo4j 自动提取并构建实体（如“器件”、“参数”）及其关联关系。
--   **向量检索**: 使用本地 `BAAI/bge-m3` 或 Gemini 对文本块构建语义索引，存储于 Qdrant。
--   **智能路由**: 根据用户意图自动选择最佳检索策略（精确匹配、图谱遍历或语义搜索）。
+### 2. 自适应实体提取 (Adaptive Entity Extraction)
+-   **Tier-Specific Prompts**: 针对不同分级内容加载专用 Prompt（如 RED 层的工艺参数模板、YELLOW 层的关系映射模板）。
+-   **图谱增强**: 利用 Neo4j 构建高精度知识图谱，支持跨段落实体关联。
+-   **向量检索**: 使用本地 `BAAI/bge-m3` 构建语义索引，存储于 Qdrant。
 
-### 3. 审计式生成 (Audited Generation)
--   **分级质检**: 关键数据（红色分级）经过多轮 AI 交叉验证。
--   **溯源引用**: 所有回答均严格标注来源文件页码及具体内容块。
+### 3. 性能与体验优化
+-   **批处理 (Batching)**: 支持多块并发验证，减少 API 调用延迟。
+-   **自动浏览器**: 启动服务时自动打开默认浏览器访问 Web 界面。
+-   **任务管理**: 支持任务取消即时清理数据库，界面侧边栏自动维护任务状态。
 
 ## 🛠️ 技术栈
 
--   **后端**: Python 3.12, FastAPI, Uvicorn
+-   **后端**: Python 3.12, FastAPI, Uvicorn (Web Server)
 -   **编排**: LangGraph, LangChain
 -   **AI 模型**: Google Gemini (via `google-genai` SDK)
 -   **数据库**:
-    -   Neo4j (图数据库)
-    -   Qdrant (向量数据库)
--   **前端**: 原生 HTML/JS/CSS (无复杂框架依赖), Markdown 渲染
+    -   Neo4j (图数据库: 实体关系)
+    -   Qdrant (向量数据库: 语义检索)
+-   **前端**: 原生 HTML/JS/CSS (极简设计，Unified UI Style)
 
 ## 🚀 快速开始
 
@@ -43,7 +47,7 @@ python -m venv venv
 .\venv\Scripts\activate  # Windows
 # source venv/bin/activate # Linux/Mac
 
-# 安装依赖
+# 安装依赖 (已新增 pypdf, numpy)
 pip install -r requirements.txt
 ```
 
@@ -71,22 +75,34 @@ docker run -d -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j
 ### 5. 启动服务
 ```bash
 python server.py
-# 服务将运行在 http://localhost:8000
+# 服务启动后，浏览器将自动打开 http://localhost:8000
 ```
+
+## 📂 实用工具
+
+### PDF 智能切分
+如果文档过大，可以使用内置脚本将其按页拆分（支持拖拽路径）：
+
+```powershell
+python scripts/split_pdf.py
+```
+-   支持 30 页/份自动切分。
+-   自动处理 Windows 路径引号。
 
 ## 📂 项目结构
 
--   `server.py`: FastAPI 主程序及 API 接口。
--   `core/`: 核心逻辑 (解析器, 向量库, 图数据库, 配置)。
--   `agents/`: LangGraph 节点 (路由, 检索, 分析)。
--   `static/`: 前端静态资源 (HTML, CSS, JS)。
--   `utils/`: 工具类 (Gemini 客户端, 日志)。
+-   `server.py`: FastAPI 主程序及 API 接口 (包含后台任务管理)。
+-   `core/`: 核心逻辑 (Parser, VectorStore, GraphStore, Config)。
+-   `agents/`: LangGraph 节点 (GraphBuilder, RAG Router)。
+-   `static/`: 前端静态资源 (Style 统一优化)。
+-   `scripts/`: 实用脚本 (test_optimization.py, split_pdf.py)。
 
 ## 💡 使用指南
 
 1.  **上传文档**: 拖拽 PDF 文件至上传区。系统会自动进行混合解析，提取实体并构建索引。
-2.  **专业问答**: 提出技术问题（例如：“LDMOS 器件的击穿电压是多少？”）。
-3.  **图谱溯源**: 系统给出的每个论断都会链接到具体的文档和页码。
+2.  **取消任务**: 上传过程中可随时取消，系统会自动清理已产生的脏数据。
+3.  **专业问答**: 提出技术问题（例如：“LDMOS 器件的击穿电压是多少？”）。
+4.  **图谱溯源**: 系统给出的每个论断都会链接到具体的文档和页码。
 
 ## 许可证
 MIT

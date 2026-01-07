@@ -154,15 +154,32 @@ function updateTaskUI(taskId, data) {
 
     if (data.status === 'completed') {
         fill.style.backgroundColor = '#10b981'; // Green
+        msg.textContent = '已完成';
         cancelBtn.remove();
         loadFileList(); // Refresh file list
+
+        // Remove from sidebar after short delay (UX: allow user to see "success" briefly)
         setTimeout(() => {
-            // Optional: fade out after 5 seconds
-            // el.style.opacity = '0.5';
-        }, 5000);
-    } else if (data.status === 'error' || data.status === 'cancelled') {
+            el.style.opacity = '0';
+            setTimeout(() => el.remove(), 500); // Wait for fade out
+        }, 2000);
+
+    } else if (data.status === 'error') {
         fill.style.backgroundColor = '#ef4444'; // Red
         cancelBtn.remove();
+        // Error tasks might stay for user to see, maybe? Or remove? 
+        // User asked "Task cancelled and completed remove from sidebar". Didn't specify error.
+        // Assuming keep error for inspection.
+    } else if (data.status === 'cancelled') {
+        fill.style.backgroundColor = '#94a3b8'; // Grey
+        msg.textContent = '已取消';
+        cancelBtn.remove();
+
+        // Remove cancelled tasks quickly
+        setTimeout(() => {
+            el.style.opacity = '0';
+            setTimeout(() => el.remove(), 500);
+        }, 1000);
     }
 }
 

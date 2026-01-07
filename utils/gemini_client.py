@@ -117,15 +117,21 @@ class GeminiClient:
         raise NotImplementedError("Gemini embedding is deprecated. Use LocalEmbedding instead.")
 
     
-    def extract_entities(self, text: str) -> list:
+    def extract_entities(self, text: str, prompt_template: str = None) -> list:
         """
         从文本中提取实体和关系
+        Args:
+            text: 待分析文本
+            prompt_template: 可选的自定义提示词模板，必须包含 {text} 占位符
         """
         logger = logging.getLogger(__name__)
         logger.info(f"[LLM实体提取] 开始提取实体和关系 - 文本长度: {len(text)} 字符")
-        logger.debug(f"[LLM实体提取] 输入文本: {text}")
         
-        prompt = f"""你是一位资深的 IC 设计和 BCD 工艺专家。请从以下文本中提取实体和它们之间的关系：
+        if prompt_template:
+            prompt = prompt_template.format(text=text)
+        else:
+            # Default Fallback Prompt
+            prompt = f"""你是一位资深的 IC 设计和 BCD 工艺专家。请从以下文本中提取实体和它们之间的关系：
 
 文本：{text}
 
@@ -138,31 +144,32 @@ class GeminiClient:
 
 请只输出提取的内容，不要添加任何其他解释。"""
         
-        logger.debug(f"[LLM实体提取] 生成的提示词: {prompt}")
+        # logger.debug(f"[LLM实体提取] 生成的提示词: {prompt}")
         response = self.generate_text(prompt, use_pro=True)
-        logger.info(f"[LLM实体提取] LLM返回结果长度: {len(response)} 字符")
-        logger.debug(f"[LLM实体提取] LLM原始返回: {response}")
+        # logger.info(f"[LLM实体提取] LLM返回结果长度: {len(response)} 字符")
         
         entities = []
         lines = response.strip().split("\n")
-        logger.info(f"[LLM实体提取] LLM返回行数: {len(lines)}")
         
         for line in lines:
             line = line.strip()
             if line:
+                # Handle CSV parsing robustly (some LLMs imply quotes)
+                # Quick & Dirty split by comma, improvement: use csv module if needed
                 parts = line.split(",")
-                logger.debug(f"[LLM实体提取] 处理行: {line} -> 分割为 {len(parts)} 部分: {parts}")
-                if len(parts) == 3:
+                if len(parts) >= 3:
+                    # Merge extra commas into the target if 3+ (simple heuristic)
+                    source = parts[0].strip()
+                    relation = parts[1].strip()
+                    target = ",".join(parts[2:]).strip() 
+                    
                     entity_relation = {
-                        "source": parts[0].strip(),
-                        "relation": parts[1].strip(),
-                        "target": parts[2].strip()
+                        "source": source,
+                        "relation": relation,
+                        "target": target
                     }
                     entities.append(entity_relation)
-                    logger.info(f"[LLM实体提取] 成功解析实体关系: {entity_relation}")
-                else:
-                    logger.warning(f"[LLM实体提取] 无效的实体关系行: {line}")
+                    # logger.info(f"[LLM实体提取] 成功解析实体关系: {entity_relation}")
         
         logger.info(f"[LLM实体提取] 提取完成 - 共提取到 {len(entities)} 个实体关系")
-        logger.debug(f"[LLM实体提取] 最终实体关系列表: {entities}")
         return entities

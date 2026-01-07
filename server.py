@@ -44,6 +44,13 @@ logging.getLogger("google_genai").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
+# Filter out repetitive polling logs from uvicorn
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/api/task/" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
 # Lifespan manager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -201,12 +208,32 @@ def process_file_background(task_id: str, file_path: str, filename: str, app_sta
     except Exception as e:
         if str(e) == "Task Cancelled":
             task_manager.update_task(task_id, "cancelled", 0, "已取消", "用户取消上传")
+            logger.warning(f"Task {task_id} cancelled. Cleaning up resources for file: {filename}")
+            
+            # Clean up Database
+            try:
+                # 1. Vector Store
+                vector_store.delete_document(filename)
+                logger.info(f"Cleaned up Vector Store for {filename}")
+                
+                # 2. Graph Store
+                graph_store.delete_document(filename)
+                logger.info(f"Cleaned up Graph Store for {filename}")
+                
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup for cancelled task {task_id}: {cleanup_error}")
+                
         else:
             logger.error(f"Error processing file: {e}")
+            import traceback
+            traceback.print_exc()
             task_manager.update_task(task_id, "error", 0, "处理失败", str(e))
     finally:
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+            except:
+                pass
 
 @app.post("/api/upload")
 async def upload_files(request: Request, files: List[UploadFile] = File(...), background_tasks: BackgroundTasks = None):
@@ -331,4 +358,15 @@ async def delete_file(request: Request, filename: str):
 
 if __name__ == "__main__":
     import uvicorn
+    import webbrowser
+    import threading
+    import time
+
+    def open_browser():
+        time.sleep(1.5)
+        webbrowser.open(f"http://{settings.HOST}:{settings.PORT}")
+
+    # Auto-open browser in a separate thread to not block uvicorn
+    threading.Thread(target=open_browser, daemon=True).start()
+    
     uvicorn.run("server:app", host=settings.HOST, port=settings.PORT, reload=True)
