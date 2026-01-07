@@ -124,9 +124,9 @@ class PDFParser:
             
             # logger.debug(f"[分类] 语义相似度 - RED: {red_sim:.3f}, YELLOW: {yellow_sim:.3f} | Content: {block_content[:30]}...")
             
-            if red_sim > 0.6: # Threshold can be tuned
+            if red_sim > settings.SEMANTIC_THRESHOLD: 
                 return "RED"
-            if yellow_sim > 0.6:
+            if yellow_sim > settings.SEMANTIC_THRESHOLD:
                 return "YELLOW"
                 
         except Exception as e:

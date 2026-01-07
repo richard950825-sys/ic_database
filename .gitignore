@@ -27,6 +27,8 @@ inspect_qdrant.py
 temp_uploads/
 
 server.log
+.streamlit/
+implementation_plan.md.resolved
 
 
 

@@ -213,8 +213,12 @@ def process_file_background(task_id: str, file_path: str, filename: str, app_sta
             # Clean up Database
             try:
                 # 1. Vector Store
-                vector_store.delete_document(filename)
-                logger.info(f"Cleaned up Vector Store for {filename}")
+                # Check for method existence for safety, though we just standardized it
+                if hasattr(vector_store, 'delete_document'):
+                    vector_store.delete_document(filename)
+                    logger.info(f"Cleaned up Vector Store for {filename}")
+                else:
+                    logger.warning("VectorStore missing delete_document method")
                 
                 # 2. Graph Store
                 graph_store.delete_document(filename)
@@ -338,10 +342,10 @@ async def delete_file(request: Request, filename: str):
              raise HTTPException(status_code=400, detail="Invalid filename format")
 
         # 1. Delete from Vector Store
-        if hasattr(request.app.state.vector_store, 'delete_by_file_name'):
-            request.app.state.vector_store.delete_by_file_name(safe_filename)
+        if hasattr(request.app.state.vector_store, 'delete_document'):
+            request.app.state.vector_store.delete_document(safe_filename)
         else:
-            logger.warning("VectorStore missing delete_by_file_name method")
+            logger.warning("VectorStore missing delete_document method")
 
         # 2. Delete from Graph Store
         # Use the dedicated method which handles property names correctly (filename vs name)
@@ -356,15 +360,15 @@ async def delete_file(request: Request, filename: str):
     except Exception as e:
          raise HTTPException(status_code=500, detail=str(e))
 
+def open_browser():
+    import webbrowser
+    import time
+    time.sleep(1.5)
+    webbrowser.open(f"http://{settings.HOST}:{settings.PORT}")
+
 if __name__ == "__main__":
     import uvicorn
-    import webbrowser
     import threading
-    import time
-
-    def open_browser():
-        time.sleep(1.5)
-        webbrowser.open(f"http://{settings.HOST}:{settings.PORT}")
 
     # Auto-open browser in a separate thread to not block uvicorn
     threading.Thread(target=open_browser, daemon=True).start()

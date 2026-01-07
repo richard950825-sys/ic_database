@@ -31,6 +31,7 @@ class Settings(BaseModel):
         "RED": "Process electrical parameters, breakdown voltage, leakage current constraints, device physics, semiconductor fabrication rules.",
         "YELLOW": "Detailed data tables, cross-section diagrams, schematic views, performance plots, figure captures."
     }
+    SEMANTIC_THRESHOLD: float = 0.6
 
     # Adaptive Graph Construction Prompts
     ENTITY_EXTRACTION_PROMPTS: dict = {

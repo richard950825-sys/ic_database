@@ -299,9 +299,9 @@ class VectorStore:
             )
         )
     
-    def delete_by_file_name(self, file_name: str):
+    def delete_document(self, file_name: str):
         """
-        根据文件名删除文档块
+        根据文件名删除文档块 (Standardized API)
         
         Args:
             file_name: 文件名
