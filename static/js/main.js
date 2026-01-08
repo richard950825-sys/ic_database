@@ -54,9 +54,60 @@ document.addEventListener('DOMContentLoaded', () => {
         handleFiles(e.target.files);
     });
 
-    // Initial Load
+    // Initial Load checks for System Status
+    checkSystemStatus();
     loadFileList();
 });
+
+// System Status Polling
+function checkSystemStatus() {
+    const overlay = document.getElementById('loadingOverlay');
+    const stepText = document.getElementById('loadingStep');
+    const fill = document.getElementById('loadingFill');
+
+    // Start Carousel Animation
+    let slideIndex = 0;
+    const slides = document.querySelectorAll('.robot-carousel img');
+    const carouselInterval = setInterval(() => {
+        slides.forEach(img => img.classList.remove('active'));
+        slideIndex = (slideIndex + 1) % slides.length;
+        if (slides[slideIndex]) slides[slideIndex].classList.add('active');
+    }, 2000);
+
+    const checkInterval = setInterval(async () => {
+        try {
+            // Use no-cache to avoid browser caching old status
+            const res = await fetch('/api/status?t=' + Date.now());
+            if (!res.ok) {
+                // Might happen if server is technically up but init logic crashed?
+                stepText.textContent = "连接服务器中...";
+                return;
+            }
+            const data = await res.json();
+
+            stepText.textContent = data.step;
+            fill.style.width = `${data.progress}%`;
+
+            if (data.is_ready) {
+                clearInterval(checkInterval);
+                clearInterval(carouselInterval);
+
+                // Hide Overlay
+                overlay.style.opacity = '0';
+                setTimeout(() => {
+                    overlay.style.display = 'none';
+                }, 800);
+
+                // Update header status
+                const indicator = document.getElementById('systemStatus');
+                if (indicator) indicator.textContent = "系统在线";
+            }
+        } catch (e) {
+            stepText.textContent = "等待服务响应...";
+            console.log("Waiting for server...", e);
+        }
+    }, 1000);
+}
 
 // Tab Switching
 function switchTab(tabName) {
@@ -188,7 +239,8 @@ function startPolling(taskId) {
 
     pollingIntervals[taskId] = setInterval(async () => {
         try {
-            const res = await fetch(`/api/task/${taskId}`);
+            // Anti-caching: append timestamp
+            const res = await fetch(`/api/task/${taskId}?t=${new Date().getTime()}`);
             if (!res.ok) { // Task might be gone or server error
                 clearInterval(pollingIntervals[taskId]);
                 return;
@@ -196,14 +248,40 @@ function startPolling(taskId) {
             const data = await res.json();
             updateTaskUI(taskId, data);
 
+            // UX Improvement: Notify when Vector Search is ready
+            // Check custom flag search_ready. 
+            // We use a local set to avoid spamming the toast.
+            if (data.search_ready && !taskIdToReadyState[taskId]) {
+                taskIdToReadyState[taskId] = true;
+                // Show toast
+                const toast = document.createElement('div');
+                toast.className = 'toast-notification';
+                toast.textContent = `✨ ${data.filename || "文件"} 向量处理完成，您可以开始提问了！(后台将继续构建图谱)`;
+                document.body.appendChild(toast);
+                setTimeout(() => {
+                    toast.style.opacity = '0';
+                    setTimeout(() => toast.remove(), 500);
+                }, 5000);
+
+                // Refresh file list so user can see it in sidebar
+                try {
+                    loadFileList();
+                } catch (err) {
+                    console.error("Failed to load file list:", err);
+                }
+            }
+
             if (data.status === 'completed' || data.status === 'error' || data.status === 'cancelled') {
                 clearInterval(pollingIntervals[taskId]);
                 delete pollingIntervals[taskId];
             }
         } catch (e) {
             console.error('Polling error', e);
+            // Do not clear interval on transient network errors, unless frequent
+            // For now, let's keep it running to recover from temp failures
+            // clearInterval(pollingIntervals[taskId]); 
         }
-    }, 1000); // Poll every 1s
+    }, 1000);
 }
 
 async function cancelTask(taskId) {

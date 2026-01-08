@@ -77,7 +77,14 @@ class GraphBuilder:
                 
                 # Update progress
                 if progress_callback:
-                    progress_callback(stats["processed_blocks"], total_valid, f"提取实体 (块 {idx+1})")
+                    try:
+                        progress_callback(stats["processed_blocks"], total_valid, f"提取实体 (块 {idx+1})")
+                    except Exception as e:
+                        logger.warning(f"[图谱构建] 检测到回调异常 (可能是用户取消): {e}")
+                        # User cancelled - stop everything immediately
+                        logger.info("[图谱构建] 立即停止所有剩余任务...")
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise e
 
         logger.info(f"[图谱构建] ========== 图谱构建完成 ==========")
         logger.info(f"[图谱构建] 处理块数: {stats['processed_blocks']}/{len(valid_blocks)}, 创建实体数: {stats['entities_created']}, 创建关系数: {stats['relations_created']}")

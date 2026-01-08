@@ -122,6 +122,11 @@ class VectorStore:
         
         # 生成嵌入向量
         embedding = self.generate_embedding(text_to_embed)
+        
+        if not embedding or len(embedding) == 0:
+            logger.warning(f"[向量库] 嵌入向量为空，跳过文档块 - ID: {block.get('id', 'unknown')}")
+            return None
+
         logger.debug(f"[向量库] 嵌入向量生成完成，维度: {len(embedding)}")
         
         # 准备元数据

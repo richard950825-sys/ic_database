@@ -102,6 +102,7 @@ class PDFParser:
         # 3. 语义匹配 (Slow Path, using Embeddings)
         # 计算与 RED/YELLOW原型的相似度
         try:
+            from core.config import settings
             import numpy as np
             
             def cosine_sim(a, b):
@@ -316,7 +317,7 @@ class PDFParser:
                         if processed_block:
                             blocks.append(processed_block)
         
-        if hasattr(document, 'content'):
+        elif hasattr(document, 'content'):
             # 尝试处理content属性
             logger.info(f"[块提取] 检测到content属性")
             logger.debug(f"[块提取] content 属性类型: {type(document.content)}")
@@ -559,51 +560,65 @@ class PDFParser:
             return block
         
         try:
-            if block["tier"] == "RED":
-                # RED 块：优化为单次高质量解析，减少 API 调用和耗时
-                if block["type"] == "text":
-                    logger.debug(f"[QA验证] RED块 {idx+1} 开始解析 (优化模式)")
-                    # 使用更明确的 Prompt，单次调用即可
-                    verified_text = gemini_client.generate_text(
-                        f"作为 IC/BCD 工艺专家，请准确解析并修正以下技术内容的表述，提取关键参数：\n{block['content']}",
-                        use_pro=True
-                    )
-                    block["verified_content"] = verified_text
-                    block["verification_passed"] = True
+            # Retry logic for 503 Overload or other transient errors
+            max_retries = 3
+            retry_delay = 2
             
-            elif block["tier"] == "YELLOW":
-                # YELLOW 块：保持单次解析
-                if block["type"] == "table":
-                    logger.debug(f"[QA验证] YELLOW块 {idx+1} 表格解析")
-                    table_markdown = block["content"]
-                    verified_text = gemini_client.generate_text(
-                        f"请准确解析以下工艺参数表格(Markdown格式)，提取关键参数和层级关系：\n{table_markdown}",
-                        use_pro=True
-                    )
-                    block["verified_content"] = verified_text
-                    block["verification_passed"] = True
-                elif block["type"] == "image":
-                    logger.debug(f"[QA验证] YELLOW块 {idx+1} 图像描述生成")
-                    # Hybrid Strategy: Since OCR is disabled, scanned tables appear as images.
-                    # We expressly ask the LLM to output Markdown if it sees a table.
-                    image_description = gemini_client.generate_multimodal(
-                        prompt="请分析这张 IC/BCD 工艺相关的图片。\n1. 如果图片是表格（包含有线或无线的表结构），请务必将其转换为 Markdown 表格格式输出。\n2. 如果是电路图、截面图或示意图，请详细描述其结构、关键参数和特性。\n3. 如果是普通文本截图，请提取其中的文字内容。",
-                        image_base64=block["content"],
-                        use_pro=True
-                    )
-                    block["verified_content"] = image_description
-                    block["verification_passed"] = True
-                else:
-                    block["verified_content"] = block["content"]
-                    block["verification_passed"] = True
-            
-            elif block["tier"] == "GREEN":
-                # GREEN 块：直接通过
-                block["verified_content"] = block["content"]
-                block["verification_passed"] = True
-            
+            for attempt in range(max_retries):
+                try:
+                    if block["tier"] == "RED":
+                        # RED 块：优化为单次高质量解析
+                        if block["type"] == "text":
+                            logger.debug(f"[QA验证] RED块 {idx+1} 开始解析 (优化模式)")
+                            verified_text = gemini_client.generate_text(
+                                f"作为 IC/BCD 工艺专家，请准确解析并修正以下技术内容的表述，提取关键参数：\n{block['content']}",
+                                use_pro=True
+                            )
+                            block["verified_content"] = verified_text
+                            block["verification_passed"] = True
+                    
+                    elif block["tier"] == "YELLOW":
+                        # YELLOW 块
+                        if block["type"] == "table":
+                            logger.debug(f"[QA验证] YELLOW块 {idx+1} 表格解析")
+                            table_markdown = block["content"]
+                            verified_text = gemini_client.generate_text(
+                                f"请准确解析以下工艺参数表格(Markdown格式)，提取关键参数和层级关系：\n{table_markdown}",
+                                use_pro=True
+                            )
+                            block["verified_content"] = verified_text
+                            block["verification_passed"] = True
+                        elif block["type"] == "image":
+                            logger.debug(f"[QA验证] YELLOW块 {idx+1} 图像描述生成")
+                            image_description = gemini_client.generate_multimodal(
+                                prompt="请分析这张 IC/BCD 工艺相关的图片。\n1. 如果图片是表格（包含有线或无线的表结构），请务必将其转换为 Markdown 表格格式输出。\n2. 如果是电路图、截面图或示意图，请详细描述其结构、关键参数和特性。\n3. 如果是普通文本截图，请提取其中的文字内容。",
+                                image_base64=block["content"],
+                                use_pro=True
+                            )
+                            block["verified_content"] = image_description
+                            block["verification_passed"] = True
+                        else:
+                            block["verified_content"] = block["content"]
+                            block["verification_passed"] = True
+                    
+                    elif block["tier"] == "GREEN":
+                        block["verified_content"] = block["content"]
+                        block["verification_passed"] = True
+
+                    # If successful, break retry loop
+                    break
+
+                except Exception as api_error:
+                    if attempt < max_retries - 1:
+                        import time
+                        wait_time = retry_delay * (2 ** attempt)
+                        logger.warning(f"[QA验证] 块 {idx+1} API调用失败 (尝试 {attempt+1}/{max_retries}): {api_error}. 等待 {wait_time}s 重试...")
+                        time.sleep(wait_time)
+                    else:
+                        raise api_error # Re-raise to be caught by outer try-except
+
         except Exception as e:
-            logger.error(f"[QA验证] 块 {idx+1} 验证失败: {str(e)}")
+            logger.error(f"[QA验证] 块 {idx+1} 验证最终失败: {str(e)}")
             block["verified_content"] = str(block.get("content", ""))
             block["verification_passed"] = False
             
@@ -689,6 +704,7 @@ class PDFParser:
                 try:
                     logger.info(f"[QA验证] 发送Batch请求 (Size: {len(batch_indices)})")
                     response_text = gemini_client.generate_text(full_prompt, use_pro=True)
+                    logger.info(f"[QA验证] Batch请求成功，解析完成")
                     
                     # 简单解析 JSON-like response (Gemini sometimes returns markdown json)
                     import json
@@ -746,6 +762,7 @@ class PDFParser:
                 try:
                     result_block = future.result()
                     verified_blocks_map[idx] = result_block
+                    logger.info(f"[QA验证] YELLOW/Special Block {idx} 验证完成")
                 except Exception as e:
                     logger.error(f"[QA验证] Special Block {idx} 失败: {e}")
                     block = blocks[idx]
