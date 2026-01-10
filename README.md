@@ -56,7 +56,7 @@ pip install -r requirements.txt
 
 ```ini
 GOOGLE_API_KEY=your_key_here
-NEO4J_URI=bolt://localhost:7687
+NEO4J_URI=bolt://localhost:17687
 NEO4J_PASSWORD=password
 QDRANT_URL=http://localhost:6333
 # 如需代理请配置
@@ -64,18 +64,24 @@ QDRANT_URL=http://localhost:6333
 ```
 
 ### 4. 启动数据库
+使用提供的脚本自动启动服务（已处理端口冲突，使用 17474/17687 端口）：
+```powershell
+scripts/start_services.bat
+```
+或者手动运行（注意端口映射）：
 ```bash
 # Qdrant 向量库
 docker run -d -p 6333:6333 qdrant/qdrant
-
+ 
 # Neo4j 图数据库
-docker run -d -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j
+# 映射到 17474 (HTTP) 和 17687 (Bolt) 以避开 Windows 保留端口
+docker run -d -p 17474:7474 -p 17687:7687 -e NEO4J_AUTH=neo4j/password neo4j
 ```
 
 ### 5. 启动服务
 ```bash
 python server.py
-# 服务启动后，浏览器将自动打开 http://localhost:8000
+# 服务启动后，浏览器将自动打开 http://localhost:38080
 ```
 
 ## 📂 实用工具

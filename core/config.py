@@ -4,7 +4,7 @@ from pydantic import BaseModel
 class Settings(BaseModel):
     # App Settings
     HOST: str = "127.0.0.1"
-    PORT: int = 8000
+    PORT: int = 38080
     TEMP_DIR: str = "temp_uploads"
     
     # Retrieval Settings

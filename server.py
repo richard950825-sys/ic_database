@@ -394,6 +394,7 @@ async def chat(request: Request, body: ChatRequest):
 @app.get("/api/files")
 async def list_files(request: Request):
     try:
+        check_ready(request)
         # User reported 'null' filenames.
         # Root cause: add_document sets 'filename', but this query was reading 'name'.
         query = "MATCH (d:Document) RETURN DISTINCT d.filename as filename, d.upload_time as time, d.size as size"
